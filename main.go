@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -107,6 +108,7 @@ type FitbitSleepStageSummary struct {
 type openRouterReq struct {
 	Model    string          `json:"model"`
 	Messages []openRouterMsg `json:"messages"`
+	Stream   bool            `json:"stream,omitempty"`
 }
 
 type openRouterMsg struct {
@@ -120,6 +122,9 @@ type openRouterResp struct {
 
 type openRouterChoice struct {
 	Message openRouterMsg `json:"message"`
+	Delta   *struct {
+		Content string `json:"content"`
+	} `json:"delta,omitempty"`
 }
 
 func loadConfig(configPath string) (*Config, error) {
@@ -930,7 +935,12 @@ func morningFunction(config *Config, additionalText string) error {
 
 const openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
 
-func writerFunction(config *Config, settingPath string) error {
+// streamChunk is one SSE chunk from OpenRouter (streaming).
+type streamChunk struct {
+	Choices []openRouterChoice `json:"choices"`
+}
+
+func writerFunction(config *Config, settingPath, outputPath string) error {
 	if config.OpenRouter.APIKey == "" {
 		return fmt.Errorf("'openrouter.api_key' not found in config file")
 	}
@@ -952,6 +962,7 @@ func writerFunction(config *Config, settingPath string) error {
 		Messages: []openRouterMsg{
 			{Role: "user", Content: prompt},
 		},
+		Stream: true,
 	}
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
@@ -965,7 +976,6 @@ func writerFunction(config *Config, settingPath string) error {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+config.OpenRouter.APIKey)
 
-	// Use a long timeout for OpenRouter; generation can take several minutes
 	client := &http.Client{Timeout: 10 * time.Minute}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -973,27 +983,53 @@ func writerFunction(config *Config, settingPath string) error {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read OpenRouter response: %w", err)
-	}
-
 	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("OpenRouter API error: %d %s", resp.StatusCode, string(body))
 	}
 
-	var orResp openRouterResp
-	if err := json.Unmarshal(body, &orResp); err != nil {
-		return fmt.Errorf("failed to parse OpenRouter response: %w", err)
+	// Parse SSE stream: "data: {...}\n" or "data: [DONE]\n", ignore ": OPENROUTER PROCESSING"
+	var contentBuilder strings.Builder
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, ": ") {
+			// Comment line (e.g. ": OPENROUTER PROCESSING")
+			continue
+		}
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		payload = strings.TrimSpace(payload)
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var chunk streamChunk
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue // skip malformed chunks
+		}
+		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta != nil {
+			contentBuilder.WriteString(chunk.Choices[0].Delta.Content)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("failed to read stream: %w", err)
 	}
 
-	if len(orResp.Choices) == 0 {
-		return fmt.Errorf("OpenRouter returned no choices")
-	}
-
-	content := strings.TrimSpace(orResp.Choices[0].Message.Content)
+	content := strings.TrimSpace(contentBuilder.String())
 	if content == "" {
 		return fmt.Errorf("OpenRouter returned empty content")
+	}
+
+	if outputPath != "" {
+		if err := os.WriteFile(outputPath, []byte(content), 0644); err != nil {
+			return fmt.Errorf("failed to write output file: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "Wrote result to %s\n", outputPath)
 	}
 
 	if err := postToTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, content); err != nil {
@@ -1018,7 +1054,8 @@ Flags:
   -f, --file PATH     Read content from a file
   -P, --photo PATH    Path to photo file(s) to post (comma-separated, caption from -p or -f)
   -m, --morning       Get Fitbit sleep data and post to Telegram channel
-  -W, --writer PATH   Read setting from file, send to OpenRouter, post generated content
+  -W, --writer PATH   Read setting from file, send to OpenRouter (streaming), post generated content
+  -o, --output PATH   Write generated content to file (use with -W)
 
 Examples:
   cairn -p "Hello world #tag1 #tag2"
@@ -1029,6 +1066,7 @@ Examples:
   cairn -c ~/.custom_cairn.toml -p "Custom config"
   cairn --morning
   cairn -W prompt.txt
+  cairn -W prompt.txt -o result.txt
 `, version)
 }
 
@@ -1038,7 +1076,8 @@ func main() {
 	filePath := pflag.StringP("file", "f", "", "Read content from a file")
 	photoPathStr := pflag.StringP("photo", "P", "", "Path to photo file(s) to post (comma-separated)")
 	morning := pflag.BoolP("morning", "m", false, "Get Fitbit sleep data and post to Telegram channel")
-	writerPath := pflag.StringP("writer", "W", "", "Read setting from file, send to OpenRouter, post generated content")
+	writerPath := pflag.StringP("writer", "W", "", "Read setting from file, send to OpenRouter (streaming), post generated content")
+	outputPath := pflag.StringP("output", "o", "", "Write generated content to file (use with -W)")
 	help := pflag.BoolP("help", "h", false, "Show help message")
 
 	pflag.Parse()
@@ -1085,7 +1124,7 @@ func main() {
 
 	// Handle writer command
 	if *writerPath != "" {
-		if err := writerFunction(config, *writerPath); err != nil {
+		if err := writerFunction(config, *writerPath, *outputPath); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
