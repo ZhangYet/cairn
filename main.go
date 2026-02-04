@@ -1032,11 +1032,7 @@ func writerFunction(config *Config, settingPath, outputPath string) error {
 		fmt.Fprintf(os.Stderr, "Wrote result to %s\n", outputPath)
 	}
 
-	if err := postToTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, content); err != nil {
-		return fmt.Errorf("failed to post to Telegram: %w", err)
-	}
-
-	fmt.Fprintln(os.Stderr, "Successfully generated content and posted to Telegram channel")
+	fmt.Fprintln(os.Stderr, "Successfully generated content")
 	return nil
 }
 
@@ -1054,7 +1050,7 @@ Flags:
   -f, --file PATH     Read content from a file
   -P, --photo PATH    Path to photo file(s) to post (comma-separated, caption from -p or -f)
   -m, --morning       Get Fitbit sleep data and post to Telegram channel
-  -W, --writer PATH   Read setting from file, send to OpenRouter (streaming), post generated content
+  -W, --writer PATH   Read setting from file, send to OpenRouter (streaming), get generated content
   -o, --output PATH   Write generated content to file (use with -W)
 
 Examples:
@@ -1076,7 +1072,7 @@ func main() {
 	filePath := pflag.StringP("file", "f", "", "Read content from a file")
 	photoPathStr := pflag.StringP("photo", "P", "", "Path to photo file(s) to post (comma-separated)")
 	morning := pflag.BoolP("morning", "m", false, "Get Fitbit sleep data and post to Telegram channel")
-	writerPath := pflag.StringP("writer", "W", "", "Read setting from file, send to OpenRouter (streaming), post generated content")
+	writerPath := pflag.StringP("writer", "W", "", "Read setting from file, send to OpenRouter (streaming), get generated content")
 	outputPath := pflag.StringP("output", "o", "", "Write generated content to file (use with -W)")
 	help := pflag.BoolP("help", "h", false, "Show help message")
 
