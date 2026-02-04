@@ -26,8 +26,9 @@ import (
 const version = "0.1.3"
 
 type Config struct {
-	Telegram TelegramConfig `toml:"telegram"`
-	Fitbit   FitbitConfig   `toml:"fitbit"`
+	Telegram   TelegramConfig   `toml:"telegram"`
+	Fitbit     FitbitConfig     `toml:"fitbit"`
+	OpenRouter OpenRouterConfig `toml:"openrouter"`
 }
 
 type TelegramConfig struct {
@@ -38,6 +39,11 @@ type TelegramConfig struct {
 type FitbitConfig struct {
 	ClientID     string `toml:"client_id"`
 	ClientSecret string `toml:"client_secret"`
+}
+
+type OpenRouterConfig struct {
+	APIKey string `toml:"api_key"`
+	Model  string `toml:"model"`
 }
 
 type TelegramResponse struct {
@@ -97,6 +103,25 @@ type FitbitSleepStageSummary struct {
 	Minutes int `json:"minutes"`
 }
 
+// OpenRouter chat completion types
+type openRouterReq struct {
+	Model    string          `json:"model"`
+	Messages []openRouterMsg `json:"messages"`
+}
+
+type openRouterMsg struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type openRouterResp struct {
+	Choices []openRouterChoice `json:"choices"`
+}
+
+type openRouterChoice struct {
+	Message openRouterMsg `json:"message"`
+}
+
 func loadConfig(configPath string) (*Config, error) {
 	// Expand user home directory
 	expandedPath := configPath
@@ -115,7 +140,7 @@ func loadConfig(configPath string) (*Config, error) {
 	data, err := os.ReadFile(expandedPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("config file not found at %s\nPlease create a config file with the following structure:\n[telegram]\nbot_token = \"your_bot_token\"\nchannel_id = \"@your_channel\"\n\n[fitbit]\nclient_id = \"your_client_id\"\nclient_secret = \"your_client_secret\"", expandedPath)
+			return nil, fmt.Errorf("config file not found at %s\nPlease create a config file with the following structure:\n[telegram]\nbot_token = \"your_bot_token\"\nchannel_id = \"@your_channel\"\n\n[fitbit]\nclient_id = \"your_client_id\"\nclient_secret = \"your_client_secret\"\n\n[openrouter]\napi_key = \"your_openrouter_api_key\"\nmodel = \"openrouter/model-id\"", expandedPath)
 		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
@@ -903,6 +928,81 @@ func morningFunction(config *Config, additionalText string) error {
 	return nil
 }
 
+const openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
+
+func writerFunction(config *Config, settingPath string) error {
+	if config.OpenRouter.APIKey == "" {
+		return fmt.Errorf("'openrouter.api_key' not found in config file")
+	}
+	if config.OpenRouter.Model == "" {
+		return fmt.Errorf("'openrouter.model' not found in config file")
+	}
+
+	prompt, err := readFileContent(settingPath)
+	if err != nil {
+		return fmt.Errorf("failed to read setting file: %w", err)
+	}
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return fmt.Errorf("setting file is empty")
+	}
+
+	reqBody := openRouterReq{
+		Model: config.OpenRouter.Model,
+		Messages: []openRouterMsg{
+			{Role: "user", Content: prompt},
+		},
+	}
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", openRouterURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+config.OpenRouter.APIKey)
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to call OpenRouter: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read OpenRouter response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("OpenRouter API error: %d %s", resp.StatusCode, string(body))
+	}
+
+	var orResp openRouterResp
+	if err := json.Unmarshal(body, &orResp); err != nil {
+		return fmt.Errorf("failed to parse OpenRouter response: %w", err)
+	}
+
+	if len(orResp.Choices) == 0 {
+		return fmt.Errorf("OpenRouter returned no choices")
+	}
+
+	content := strings.TrimSpace(orResp.Choices[0].Message.Content)
+	if content == "" {
+		return fmt.Errorf("OpenRouter returned empty content")
+	}
+
+	if err := postToTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, content); err != nil {
+		return fmt.Errorf("failed to post to Telegram: %w", err)
+	}
+
+	fmt.Fprintln(os.Stderr, "Successfully generated content and posted to Telegram channel")
+	return nil
+}
+
 func printHelp() {
 	fmt.Printf(`cairn - A command-line tool to post content to Telegram channels
 Version: %s
@@ -917,6 +1017,7 @@ Flags:
   -f, --file PATH     Read content from a file
   -P, --photo PATH    Path to photo file(s) to post (comma-separated, caption from -p or -f)
   -m, --morning       Get Fitbit sleep data and post to Telegram channel
+  -W, --writer PATH   Read setting from file, send to OpenRouter, post generated content
 
 Examples:
   cairn -p "Hello world #tag1 #tag2"
@@ -926,6 +1027,7 @@ Examples:
   cairn --photo image.jpg -f caption.txt
   cairn -c ~/.custom_cairn.toml -p "Custom config"
   cairn --morning
+  cairn -W prompt.txt
 `, version)
 }
 
@@ -935,6 +1037,7 @@ func main() {
 	filePath := pflag.StringP("file", "f", "", "Read content from a file")
 	photoPathStr := pflag.StringP("photo", "P", "", "Path to photo file(s) to post (comma-separated)")
 	morning := pflag.BoolP("morning", "m", false, "Get Fitbit sleep data and post to Telegram channel")
+	writerPath := pflag.StringP("writer", "W", "", "Read setting from file, send to OpenRouter, post generated content")
 	help := pflag.BoolP("help", "h", false, "Show help message")
 
 	pflag.Parse()
@@ -979,6 +1082,15 @@ func main() {
 		return
 	}
 
+	// Handle writer command
+	if *writerPath != "" {
+		if err := writerFunction(config, *writerPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	content := *postContent
 	file := *filePath
 
@@ -998,7 +1110,7 @@ func main() {
 	// If photo is not provided, either --post or --file must be provided
 	if len(photos) == 0 {
 		if content == "" && file == "" {
-			fmt.Fprintln(os.Stderr, "Error: Either --post or --file must be provided (or use -P/--photo to post a photo, or -m/--morning for sleep data)")
+			fmt.Fprintln(os.Stderr, "Error: Either --post or --file must be provided (or use -P/--photo to post a photo, -m/--morning for sleep data, or -W/--writer for OpenRouter)")
 			printHelp()
 			os.Exit(1)
 		}
