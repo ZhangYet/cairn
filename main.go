@@ -965,7 +965,8 @@ func writerFunction(config *Config, settingPath string) error {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+config.OpenRouter.APIKey)
 
-	client := &http.Client{Timeout: 60 * time.Second}
+	// Use a long timeout for OpenRouter; generation can take several minutes
+	client := &http.Client{Timeout: 10 * time.Minute}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to call OpenRouter: %w", err)
