@@ -30,6 +30,7 @@ type Config struct {
 	Telegram   TelegramConfig   `toml:"telegram"`
 	Fitbit     FitbitConfig     `toml:"fitbit"`
 	OpenRouter OpenRouterConfig `toml:"openrouter"`
+	OpenAI     OpenAIConfig     `toml:"openai"`
 }
 
 type TelegramConfig struct {
@@ -43,6 +44,11 @@ type FitbitConfig struct {
 }
 
 type OpenRouterConfig struct {
+	APIKey string `toml:"api_key"`
+	Model  string `toml:"model"`
+}
+
+type OpenAIConfig struct {
 	APIKey string `toml:"api_key"`
 	Model  string `toml:"model"`
 }
@@ -145,7 +151,7 @@ func loadConfig(configPath string) (*Config, error) {
 	data, err := os.ReadFile(expandedPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("config file not found at %s\nPlease create a config file with the following structure:\n[telegram]\nbot_token = \"your_bot_token\"\nchannel_id = \"@your_channel\"\n\n[fitbit]\nclient_id = \"your_client_id\"\nclient_secret = \"your_client_secret\"\n\n[openrouter]\napi_key = \"your_openrouter_api_key\"\nmodel = \"openrouter/model-id\"", expandedPath)
+			return nil, fmt.Errorf("config file not found at %s\nPlease create a config file with the following structure:\n[telegram]\nbot_token = \"your_bot_token\"\nchannel_id = \"@your_channel\"\n\n[fitbit]\nclient_id = \"your_client_id\"\nclient_secret = \"your_client_secret\"\n\n[openrouter]\napi_key = \"your_openrouter_api_key\"\nmodel = \"openrouter/model-id\"\n\n[openai]\napi_key = \"your_openai_api_key\"\nmodel = \"gpt-4o-mini\"", expandedPath)
 		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
@@ -933,19 +939,23 @@ func morningFunction(config *Config, additionalText string) error {
 	return nil
 }
 
-const openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
+const (
+	openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
+	openAIURL     = "https://api.openai.com/v1/chat/completions"
+)
 
-// streamChunk is one SSE chunk from OpenRouter (streaming).
+// streamChunk is one SSE chunk (OpenAI-compatible streaming).
 type streamChunk struct {
 	Choices []openRouterChoice `json:"choices"`
 }
 
+// writerBackend is either OpenAI or OpenRouter for -W.
 func writerFunction(config *Config, settingPath, outputPath string) error {
-	if config.OpenRouter.APIKey == "" {
-		return fmt.Errorf("'openrouter.api_key' not found in config file")
-	}
-	if config.OpenRouter.Model == "" {
-		return fmt.Errorf("'openrouter.model' not found in config file")
+	useOpenAI := config.OpenAI.APIKey != "" && config.OpenAI.Model != ""
+	useOpenRouter := config.OpenRouter.APIKey != "" && config.OpenRouter.Model != ""
+
+	if !useOpenAI && !useOpenRouter {
+		return fmt.Errorf("for -W/--writer, set either [openai] api_key and model, or [openrouter] api_key and model in config")
 	}
 
 	prompt, err := readFileContent(settingPath)
@@ -957,8 +967,24 @@ func writerFunction(config *Config, settingPath, outputPath string) error {
 		return fmt.Errorf("setting file is empty")
 	}
 
+	var apiURL, apiKey, apiName string
+	if useOpenAI {
+		apiURL = openAIURL
+		apiKey = config.OpenAI.APIKey
+		apiName = "OpenAI"
+	} else {
+		apiURL = openRouterURL
+		apiKey = config.OpenRouter.APIKey
+		apiName = "OpenRouter"
+	}
+
+	model := config.OpenAI.Model
+	if !useOpenAI {
+		model = config.OpenRouter.Model
+	}
+
 	reqBody := openRouterReq{
-		Model: config.OpenRouter.Model,
+		Model: model,
 		Messages: []openRouterMsg{
 			{Role: "user", Content: prompt},
 		},
@@ -969,23 +995,23 @@ func writerFunction(config *Config, settingPath, outputPath string) error {
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", openRouterURL, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+config.OpenRouter.APIKey)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 
 	client := &http.Client{Timeout: 10 * time.Minute}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to call OpenRouter: %w", err)
+		return fmt.Errorf("failed to call %s: %w", apiName, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("OpenRouter API error: %d %s", resp.StatusCode, string(body))
+		return fmt.Errorf("%s API error: %d %s", apiName, resp.StatusCode, string(body))
 	}
 
 	// Parse SSE stream: "data: {...}\n" or "data: [DONE]\n", ignore ": OPENROUTER PROCESSING"
@@ -1022,7 +1048,7 @@ func writerFunction(config *Config, settingPath, outputPath string) error {
 
 	content := strings.TrimSpace(contentBuilder.String())
 	if content == "" {
-		return fmt.Errorf("OpenRouter returned empty content")
+		return fmt.Errorf("API returned empty content")
 	}
 
 	if outputPath != "" {
@@ -1050,7 +1076,7 @@ Flags:
   -f, --file PATH     Read content from a file
   -P, --photo PATH    Path to photo file(s) to post (comma-separated, caption from -p or -f)
   -m, --morning       Get Fitbit sleep data and post to Telegram channel
-  -W, --writer PATH   Read setting from file, send to OpenRouter (streaming), get generated content
+  -W, --writer PATH   Read setting from file, send to OpenAI or OpenRouter (streaming), get generated content
   -o, --output PATH   Write generated content to file (use with -W)
 
 Examples:
