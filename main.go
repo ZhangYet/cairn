@@ -542,6 +542,18 @@ func saveFitbitTokens(tokens *FitbitTokens) error {
 	return nil
 }
 
+// clearFitbitTokens removes the stored token file (e.g. after invalid_grant).
+func clearFitbitTokens() error {
+	tokenPath, err := getTokenFilePath()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(tokenPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func refreshFitbitToken(clientID, clientSecret, refreshToken string) (*FitbitTokens, error) {
 	urlStr := "https://api.fitbit.com/oauth2/token"
 
@@ -604,9 +616,13 @@ func getValidFitbitToken(clientID, clientSecret string) (string, error) {
 
 	// Check if token is expired (with 5 minute buffer)
 	if time.Now().Add(5 * time.Minute).After(tokens.ExpiresAt) {
-		// Refresh token
 		newTokens, err := refreshFitbitToken(clientID, clientSecret, tokens.RefreshToken)
 		if err != nil {
+			// Refresh token invalid/expired (e.g. invalid_grant) -> clear and force re-auth
+			if strings.Contains(err.Error(), "invalid_grant") || strings.Contains(err.Error(), "Refresh token invalid") {
+				_ = clearFitbitTokens()
+				return "", fmt.Errorf("no Fitbit tokens found. Please run authorization first")
+			}
 			return "", fmt.Errorf("failed to refresh token: %w", err)
 		}
 		if err := saveFitbitTokens(newTokens); err != nil {
