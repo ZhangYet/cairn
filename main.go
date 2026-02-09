@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -26,8 +27,10 @@ import (
 const version = "0.1.3"
 
 type Config struct {
-	Telegram TelegramConfig `toml:"telegram"`
-	Fitbit   FitbitConfig   `toml:"fitbit"`
+	Telegram   TelegramConfig   `toml:"telegram"`
+	Fitbit     FitbitConfig     `toml:"fitbit"`
+	OpenRouter OpenRouterConfig `toml:"openrouter"`
+	OpenAI     OpenAIConfig     `toml:"openai"`
 }
 
 type TelegramConfig struct {
@@ -38,6 +41,16 @@ type TelegramConfig struct {
 type FitbitConfig struct {
 	ClientID     string `toml:"client_id"`
 	ClientSecret string `toml:"client_secret"`
+}
+
+type OpenRouterConfig struct {
+	APIKey string `toml:"api_key"`
+	Model  string `toml:"model"`
+}
+
+type OpenAIConfig struct {
+	APIKey string `toml:"api_key"`
+	Model  string `toml:"model"`
 }
 
 type TelegramResponse struct {
@@ -97,6 +110,29 @@ type FitbitSleepStageSummary struct {
 	Minutes int `json:"minutes"`
 }
 
+// OpenRouter chat completion types
+type openRouterReq struct {
+	Model    string          `json:"model"`
+	Messages []openRouterMsg `json:"messages"`
+	Stream   bool            `json:"stream,omitempty"`
+}
+
+type openRouterMsg struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type openRouterResp struct {
+	Choices []openRouterChoice `json:"choices"`
+}
+
+type openRouterChoice struct {
+	Message openRouterMsg `json:"message"`
+	Delta   *struct {
+		Content string `json:"content"`
+	} `json:"delta,omitempty"`
+}
+
 func loadConfig(configPath string) (*Config, error) {
 	// Expand user home directory
 	expandedPath := configPath
@@ -115,7 +151,7 @@ func loadConfig(configPath string) (*Config, error) {
 	data, err := os.ReadFile(expandedPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("config file not found at %s\nPlease create a config file with the following structure:\n[telegram]\nbot_token = \"your_bot_token\"\nchannel_id = \"@your_channel\"\n\n[fitbit]\nclient_id = \"your_client_id\"\nclient_secret = \"your_client_secret\"", expandedPath)
+			return nil, fmt.Errorf("config file not found at %s\nPlease create a config file with the following structure:\n[telegram]\nbot_token = \"your_bot_token\"\nchannel_id = \"@your_channel\"\n\n[fitbit]\nclient_id = \"your_client_id\"\nclient_secret = \"your_client_secret\"\n\n[openrouter]\napi_key = \"your_openrouter_api_key\"\nmodel = \"openrouter/model-id\"\n\n[openai]\napi_key = \"your_openai_api_key\"\nmodel = \"gpt-4o-mini\"", expandedPath)
 		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
@@ -506,6 +542,18 @@ func saveFitbitTokens(tokens *FitbitTokens) error {
 	return nil
 }
 
+// clearFitbitTokens removes the stored token file (e.g. after invalid_grant).
+func clearFitbitTokens() error {
+	tokenPath, err := getTokenFilePath()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(tokenPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func refreshFitbitToken(clientID, clientSecret, refreshToken string) (*FitbitTokens, error) {
 	urlStr := "https://api.fitbit.com/oauth2/token"
 
@@ -568,9 +616,13 @@ func getValidFitbitToken(clientID, clientSecret string) (string, error) {
 
 	// Check if token is expired (with 5 minute buffer)
 	if time.Now().Add(5 * time.Minute).After(tokens.ExpiresAt) {
-		// Refresh token
 		newTokens, err := refreshFitbitToken(clientID, clientSecret, tokens.RefreshToken)
 		if err != nil {
+			// Refresh token invalid/expired (e.g. invalid_grant) -> clear and force re-auth
+			if strings.Contains(err.Error(), "invalid_grant") || strings.Contains(err.Error(), "Refresh token invalid") {
+				_ = clearFitbitTokens()
+				return "", fmt.Errorf("no Fitbit tokens found. Please run authorization first")
+			}
 			return "", fmt.Errorf("failed to refresh token: %w", err)
 		}
 		if err := saveFitbitTokens(newTokens); err != nil {
@@ -903,6 +955,129 @@ func morningFunction(config *Config, additionalText string) error {
 	return nil
 }
 
+const (
+	openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
+	openAIURL     = "https://api.openai.com/v1/chat/completions"
+)
+
+// streamChunk is one SSE chunk (OpenAI-compatible streaming).
+type streamChunk struct {
+	Choices []openRouterChoice `json:"choices"`
+}
+
+// writerBackend is either OpenAI or OpenRouter for -W.
+func writerFunction(config *Config, settingPath, outputPath string) error {
+	useOpenAI := config.OpenAI.APIKey != "" && config.OpenAI.Model != ""
+	useOpenRouter := config.OpenRouter.APIKey != "" && config.OpenRouter.Model != ""
+
+	if !useOpenAI && !useOpenRouter {
+		return fmt.Errorf("for -W/--writer, set either [openai] api_key and model, or [openrouter] api_key and model in config")
+	}
+
+	prompt, err := readFileContent(settingPath)
+	if err != nil {
+		return fmt.Errorf("failed to read setting file: %w", err)
+	}
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return fmt.Errorf("setting file is empty")
+	}
+
+	var apiURL, apiKey, apiName string
+	if useOpenAI {
+		apiURL = openAIURL
+		apiKey = config.OpenAI.APIKey
+		apiName = "OpenAI"
+	} else {
+		apiURL = openRouterURL
+		apiKey = config.OpenRouter.APIKey
+		apiName = "OpenRouter"
+	}
+
+	model := config.OpenAI.Model
+	if !useOpenAI {
+		model = config.OpenRouter.Model
+	}
+
+	reqBody := openRouterReq{
+		Model: model,
+		Messages: []openRouterMsg{
+			{Role: "user", Content: prompt},
+		},
+		Stream: true,
+	}
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	client := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to call %s: %w", apiName, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("%s API error: %d %s", apiName, resp.StatusCode, string(body))
+	}
+
+	// Parse SSE stream: "data: {...}\n" or "data: [DONE]\n", ignore ": OPENROUTER PROCESSING"
+	var contentBuilder strings.Builder
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, ": ") {
+			// Comment line (e.g. ": OPENROUTER PROCESSING")
+			continue
+		}
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		payload = strings.TrimSpace(payload)
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var chunk streamChunk
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue // skip malformed chunks
+		}
+		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta != nil {
+			contentBuilder.WriteString(chunk.Choices[0].Delta.Content)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("failed to read stream: %w", err)
+	}
+
+	content := strings.TrimSpace(contentBuilder.String())
+	if content == "" {
+		return fmt.Errorf("API returned empty content")
+	}
+
+	if outputPath != "" {
+		if err := os.WriteFile(outputPath, []byte(content), 0644); err != nil {
+			return fmt.Errorf("failed to write output file: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "Wrote result to %s\n", outputPath)
+	}
+
+	fmt.Fprintln(os.Stderr, "Successfully generated content")
+	return nil
+}
+
 func printHelp() {
 	fmt.Printf(`cairn - A command-line tool to post content to Telegram channels
 Version: %s
@@ -915,17 +1090,22 @@ Flags:
   -c, --config PATH   Path to config file (default: ~/.cairn.toml)
   -p, --post TEXT     Content to post (can include tags with #)
   -f, --file PATH     Read content from a file
-  -P, --photo PATH    Path to photo file(s) to post (comma-separated, caption from -p or -f)
+  -P, --photo PATH   Path to photo file(s) to post (comma or space-separated, caption from -p or -f)
   -m, --morning       Get Fitbit sleep data and post to Telegram channel
+  -W, --writer PATH   Read setting from file, send to OpenAI or OpenRouter (streaming), get generated content
+  -o, --output PATH   Write generated content to file (use with -W)
 
 Examples:
   cairn -p "Hello world #tag1 #tag2"
   cairn -f message.txt
   cairn -P image.jpg -p "Photo caption #tag1"
   cairn -P image1.jpg,image2.jpg -p "Multiple photos"
+  cairn -P image1.jpg image2.jpg -p "Multiple photos"
   cairn --photo image.jpg -f caption.txt
   cairn -c ~/.custom_cairn.toml -p "Custom config"
   cairn --morning
+  cairn -W prompt.txt
+  cairn -W prompt.txt -o result.txt
 `, version)
 }
 
@@ -935,6 +1115,8 @@ func main() {
 	filePath := pflag.StringP("file", "f", "", "Read content from a file")
 	photoPathStr := pflag.StringP("photo", "P", "", "Path to photo file(s) to post (comma-separated)")
 	morning := pflag.BoolP("morning", "m", false, "Get Fitbit sleep data and post to Telegram channel")
+	writerPath := pflag.StringP("writer", "W", "", "Read setting from file, send to OpenRouter (streaming), get generated content")
+	outputPath := pflag.StringP("output", "o", "", "Write generated content to file (use with -W)")
 	help := pflag.BoolP("help", "h", false, "Show help message")
 
 	pflag.Parse()
@@ -979,14 +1161,29 @@ func main() {
 		return
 	}
 
+	// Handle writer command
+	if *writerPath != "" {
+		if err := writerFunction(config, *writerPath, *outputPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	content := *postContent
 	file := *filePath
 
-	// Parse comma-separated photo paths
+	// Parse photo paths: -P accepts comma-separated and/or space-separated (remaining args)
 	var photos []string
 	if *photoPathStr != "" {
-		photoList := strings.Split(*photoPathStr, ",")
-		for _, p := range photoList {
+		for _, p := range strings.Split(*photoPathStr, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				photos = append(photos, p)
+			}
+		}
+		// -P xxx.png xxx.jpg: remaining positional args are extra photos
+		for _, p := range pflag.Args() {
 			p = strings.TrimSpace(p)
 			if p != "" {
 				photos = append(photos, p)
@@ -998,7 +1195,7 @@ func main() {
 	// If photo is not provided, either --post or --file must be provided
 	if len(photos) == 0 {
 		if content == "" && file == "" {
-			fmt.Fprintln(os.Stderr, "Error: Either --post or --file must be provided (or use -P/--photo to post a photo, or -m/--morning for sleep data)")
+			fmt.Fprintln(os.Stderr, "Error: Either --post or --file must be provided (or use -P/--photo to post a photo, -m/--morning for sleep data, or -W/--writer for OpenRouter)")
 			printHelp()
 			os.Exit(1)
 		}
