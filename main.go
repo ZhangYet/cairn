@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,6 +57,9 @@ type OpenAIConfig struct {
 type TelegramResponse struct {
 	OK          bool   `json:"ok"`
 	Description string `json:"description,omitempty"`
+	Result      *struct {
+		MessageID int64 `json:"message_id"`
+	} `json:"result,omitempty"`
 }
 
 type FitbitTokens struct {
@@ -197,11 +201,55 @@ func httpPost(url string, jsonData []byte) (*http.Response, error) {
 	return resp, nil
 }
 
-func postToTelegram(botToken, channelID, content string) error {
+func postToTelegram(botToken, channelID, content string) (messageID int64, err error) {
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken)
 	content = ensureCairnTag(content)
 	payload := map[string]interface{}{
 		"chat_id":    channelID,
+		"text":       content,
+		"parse_mode": "HTML",
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal payload: %w", err)
+	}
+
+	resp, err := httpPost(url, jsonData)
+	if err != nil {
+		return 0, fmt.Errorf("failed to post to Telegram: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var telegramResp TelegramResponse
+	if err := json.Unmarshal(body, &telegramResp); err != nil {
+		return 0, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !telegramResp.OK {
+		return 0, fmt.Errorf("telegram API error: %s", telegramResp.Description)
+	}
+
+	if telegramResp.Result != nil {
+		messageID = int64(telegramResp.Result.MessageID)
+		fmt.Fprintf(os.Stderr, "Successfully posted to Telegram channel (message_id: %d)\n", messageID)
+	} else {
+		fmt.Fprintln(os.Stderr, "Successfully posted to Telegram channel")
+	}
+	return messageID, nil
+}
+
+func editMessageTelegram(botToken, channelID string, messageID int64, content string) error {
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/editMessageText", botToken)
+	content = ensureCairnTag(content)
+	payload := map[string]interface{}{
+		"chat_id":    channelID,
+		"message_id": messageID,
 		"text":       content,
 		"parse_mode": "HTML",
 	}
@@ -213,7 +261,7 @@ func postToTelegram(botToken, channelID, content string) error {
 
 	resp, err := httpPost(url, jsonData)
 	if err != nil {
-		return fmt.Errorf("failed to post to Telegram: %w", err)
+		return fmt.Errorf("failed to edit message: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -231,7 +279,7 @@ func postToTelegram(botToken, channelID, content string) error {
 		return fmt.Errorf("telegram API error: %s", telegramResp.Description)
 	}
 
-	fmt.Fprintln(os.Stderr, "Successfully posted to Telegram channel")
+	fmt.Fprintln(os.Stderr, "Successfully updated message")
 	return nil
 }
 
@@ -948,7 +996,7 @@ func morningFunction(config *Config, additionalText string) error {
 	}
 
 	// Post to Telegram
-	if err := postToTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, sleepMessage); err != nil {
+	if _, err := postToTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, sleepMessage); err != nil {
 		return fmt.Errorf("failed to post to Telegram: %w", err)
 	}
 
@@ -1094,6 +1142,7 @@ Flags:
   -m, --morning       Get Fitbit sleep data and post to Telegram channel
   -W, --writer PATH   Read setting from file, send to OpenAI or OpenRouter (streaming), get generated content
   -o, --output PATH   Write generated content to file (use with -W)
+  -u, --update ID     Update an existing message by ID (use with -p or -f for new content)
 
 Examples:
   cairn -p "Hello world #tag1 #tag2"
@@ -1106,6 +1155,7 @@ Examples:
   cairn --morning
   cairn -W prompt.txt
   cairn -W prompt.txt -o result.txt
+  cairn -u 123 -p "Corrected message"
 `, version)
 }
 
@@ -1117,6 +1167,7 @@ func main() {
 	morning := pflag.BoolP("morning", "m", false, "Get Fitbit sleep data and post to Telegram channel")
 	writerPath := pflag.StringP("writer", "W", "", "Read setting from file, send to OpenRouter (streaming), get generated content")
 	outputPath := pflag.StringP("output", "o", "", "Write generated content to file (use with -W)")
+	updateMsgID := pflag.StringP("update", "u", "", "Message ID to update (use with -p or -f for new content)")
 	help := pflag.BoolP("help", "h", false, "Show help message")
 
 	pflag.Parse()
@@ -1164,6 +1215,40 @@ func main() {
 	// Handle writer command
 	if *writerPath != "" {
 		if err := writerFunction(config, *writerPath, *outputPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Handle update message
+	if *updateMsgID != "" {
+		msgID, err := strconv.ParseInt(*updateMsgID, 10, 64)
+		if err != nil || msgID <= 0 {
+			fmt.Fprintln(os.Stderr, "Error: -u/--update requires a positive integer message ID")
+			os.Exit(1)
+		}
+		content := *postContent
+		file := *filePath
+		if content == "" && file == "" {
+			fmt.Fprintln(os.Stderr, "Error: -u/--update requires -p or -f for the new content")
+			os.Exit(1)
+		}
+		if content != "" && file != "" {
+			fmt.Fprintln(os.Stderr, "Error: Cannot use both --post and --file with -u")
+			os.Exit(1)
+		}
+		var newContent string
+		if file != "" {
+			newContent, err = readFileContent(file)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			newContent = content
+		}
+		if err := editMessageTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, msgID, newContent); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -1236,7 +1321,7 @@ func main() {
 		}
 	} else {
 		// Post text message
-		if err := postToTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, finalContent); err != nil {
+		if _, err := postToTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, finalContent); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
