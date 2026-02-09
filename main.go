@@ -1090,7 +1090,7 @@ Flags:
   -c, --config PATH   Path to config file (default: ~/.cairn.toml)
   -p, --post TEXT     Content to post (can include tags with #)
   -f, --file PATH     Read content from a file
-  -P, --photo PATH    Path to photo file(s) to post (comma-separated, caption from -p or -f)
+  -P, --photo PATH   Path to photo file(s) to post (comma or space-separated, caption from -p or -f)
   -m, --morning       Get Fitbit sleep data and post to Telegram channel
   -W, --writer PATH   Read setting from file, send to OpenAI or OpenRouter (streaming), get generated content
   -o, --output PATH   Write generated content to file (use with -W)
@@ -1100,6 +1100,7 @@ Examples:
   cairn -f message.txt
   cairn -P image.jpg -p "Photo caption #tag1"
   cairn -P image1.jpg,image2.jpg -p "Multiple photos"
+  cairn -P image1.jpg image2.jpg -p "Multiple photos"
   cairn --photo image.jpg -f caption.txt
   cairn -c ~/.custom_cairn.toml -p "Custom config"
   cairn --morning
@@ -1172,11 +1173,17 @@ func main() {
 	content := *postContent
 	file := *filePath
 
-	// Parse comma-separated photo paths
+	// Parse photo paths: -P accepts comma-separated and/or space-separated (remaining args)
 	var photos []string
 	if *photoPathStr != "" {
-		photoList := strings.Split(*photoPathStr, ",")
-		for _, p := range photoList {
+		for _, p := range strings.Split(*photoPathStr, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				photos = append(photos, p)
+			}
+		}
+		// -P xxx.png xxx.jpg: remaining positional args are extra photos
+		for _, p := range pflag.Args() {
 			p = strings.TrimSpace(p)
 			if p != "" {
 				photos = append(photos, p)
