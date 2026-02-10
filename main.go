@@ -62,6 +62,15 @@ type TelegramResponse struct {
 	} `json:"result,omitempty"`
 }
 
+// telegramMediaGroupResponse is the response from sendMediaGroup (result is array of Message).
+type telegramMediaGroupResponse struct {
+	OK          bool   `json:"ok"`
+	Description string `json:"description,omitempty"`
+	Result      []struct {
+		MessageID int64 `json:"message_id"`
+	} `json:"result,omitempty"`
+}
+
 type FitbitTokens struct {
 	AccessToken  string    `json:"access_token"`
 	RefreshToken string    `json:"refresh_token"`
@@ -194,8 +203,9 @@ func httpPost(url string, jsonData []byte) (*http.Response, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("HTTP error: %d", resp.StatusCode)
+		return nil, fmt.Errorf("HTTP error: %d: %s", resp.StatusCode, string(body))
 	}
 
 	return resp, nil
@@ -283,85 +293,26 @@ func editMessageTelegram(botToken, channelID string, messageID int64, content st
 	return nil
 }
 
-func postPhotoToTelegram(botToken, channelID, photoPath, caption string) error {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendPhoto", botToken)
+func editMessageCaptionTelegram(botToken, channelID string, messageID int64, caption string) error {
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/editMessageCaption", botToken)
+	caption = ensureCairnTag(caption)
+	payload := map[string]interface{}{
+		"chat_id":    channelID,
+		"message_id": messageID,
+		"caption":    caption,
+		"parse_mode": "HTML",
+	}
 
-	// Read photo file
-	photoFile, err := os.Open(photoPath)
+	jsonData, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("failed to open photo file: %w", err)
+		return fmt.Errorf("failed to marshal payload: %w", err)
 	}
-	defer photoFile.Close()
 
-	// Create multipart form
-	var requestBody bytes.Buffer
-	writer := multipart.NewWriter(&requestBody)
-
-	// Add chat_id
-	chatIDField, err := writer.CreateFormField("chat_id")
+	resp, err := httpPost(url, jsonData)
 	if err != nil {
-		return fmt.Errorf("failed to create form field: %w", err)
-	}
-	chatIDField.Write([]byte(channelID))
-
-	// Add caption if provided (ensure #cairn tag is present)
-	if caption != "" {
-		caption = ensureCairnTag(caption)
-		captionField, err := writer.CreateFormField("caption")
-		if err != nil {
-			return fmt.Errorf("failed to create caption field: %w", err)
-		}
-		captionField.Write([]byte(caption))
-	} else {
-		// Even if no caption provided, add #cairn tag as caption
-		captionField, err := writer.CreateFormField("caption")
-		if err != nil {
-			return fmt.Errorf("failed to create caption field: %w", err)
-		}
-		captionField.Write([]byte("#cairn"))
-	}
-
-	// Add parse_mode
-	parseModeField, err := writer.CreateFormField("parse_mode")
-	if err != nil {
-		return fmt.Errorf("failed to create parse_mode field: %w", err)
-	}
-	parseModeField.Write([]byte("HTML"))
-
-	// Add photo file
-	photoField, err := writer.CreateFormFile("photo", filepath.Base(photoPath))
-	if err != nil {
-		return fmt.Errorf("failed to create form file: %w", err)
-	}
-	_, err = io.Copy(photoField, photoFile)
-	if err != nil {
-		return fmt.Errorf("failed to copy photo data: %w", err)
-	}
-
-	writer.Close()
-
-	// Create HTTP request
-	client := &http.Client{
-		Timeout: 30 * time.Second, // Longer timeout for file uploads
-	}
-
-	req, err := http.NewRequest("POST", url, &requestBody)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to post to Telegram: %w", err)
+		return fmt.Errorf("failed to edit caption: %w", err)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("HTTP error: %d, response: %s", resp.StatusCode, string(body))
-	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -377,14 +328,196 @@ func postPhotoToTelegram(botToken, channelID, photoPath, caption string) error {
 		return fmt.Errorf("telegram API error: %s", telegramResp.Description)
 	}
 
-	fmt.Fprintln(os.Stderr, "Successfully posted photo to Telegram channel")
+	fmt.Fprintln(os.Stderr, "Successfully updated caption")
 	return nil
 }
 
-func postMultiplePhotosToTelegram(botToken, channelID string, photoPaths []string, caption string) error {
+func editMessageMediaTelegram(botToken, channelID string, messageID int64, photoPath, caption string) error {
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/editMessageMedia", botToken)
+
+	photoFile, err := os.Open(photoPath)
+	if err != nil {
+		return fmt.Errorf("failed to open photo file: %w", err)
+	}
+	defer photoFile.Close()
+
+	caption = ensureCairnTag(caption)
+	if caption == "" {
+		caption = "#cairn"
+	}
+
+	media := map[string]string{
+		"type":       "photo",
+		"media":      "attach://photo0",
+		"caption":    caption,
+		"parse_mode": "HTML",
+	}
+	mediaJSON, err := json.Marshal(media)
+	if err != nil {
+		return fmt.Errorf("failed to marshal media: %w", err)
+	}
+
+	var requestBody bytes.Buffer
+	writer := multipart.NewWriter(&requestBody)
+
+	for _, field := range []struct{ name, value string }{
+		{"chat_id", channelID},
+		{"message_id", strconv.FormatInt(messageID, 10)},
+		{"media", string(mediaJSON)},
+	} {
+		f, _ := writer.CreateFormField(field.name)
+		f.Write([]byte(field.value))
+	}
+
+	photoField, err := writer.CreateFormFile("photo0", filepath.Base(photoPath))
+	if err != nil {
+		return fmt.Errorf("failed to create form file: %w", err)
+	}
+	if _, err := io.Copy(photoField, photoFile); err != nil {
+		return fmt.Errorf("failed to copy photo: %w", err)
+	}
+	writer.Close()
+
+	req, err := http.NewRequest("POST", url, &requestBody)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to edit media: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP error: %d: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	var telegramResp TelegramResponse
+	if err := json.Unmarshal(body, &telegramResp); err != nil {
+		return err
+	}
+	if !telegramResp.OK {
+		return fmt.Errorf("telegram API error: %s", telegramResp.Description)
+	}
+	fmt.Fprintln(os.Stderr, "Successfully replaced photo")
+	return nil
+}
+
+func postPhotoToTelegram(botToken, channelID, photoPath, caption string) (messageID int64, err error) {
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendPhoto", botToken)
+
+	// Read photo file
+	photoFile, err := os.Open(photoPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to open photo file: %w", err)
+	}
+	defer photoFile.Close()
+
+	// Create multipart form
+	var requestBody bytes.Buffer
+	writer := multipart.NewWriter(&requestBody)
+
+	// Add chat_id
+	chatIDField, err := writer.CreateFormField("chat_id")
+	if err != nil {
+		return 0, fmt.Errorf("failed to create form field: %w", err)
+	}
+	chatIDField.Write([]byte(channelID))
+
+	// Add caption if provided (ensure #cairn tag is present)
+	if caption != "" {
+		caption = ensureCairnTag(caption)
+		captionField, err := writer.CreateFormField("caption")
+		if err != nil {
+			return 0, fmt.Errorf("failed to create caption field: %w", err)
+		}
+		captionField.Write([]byte(caption))
+	} else {
+		// Even if no caption provided, add #cairn tag as caption
+		captionField, err := writer.CreateFormField("caption")
+		if err != nil {
+			return 0, fmt.Errorf("failed to create caption field: %w", err)
+		}
+		captionField.Write([]byte("#cairn"))
+	}
+
+	// Add parse_mode
+	parseModeField, err := writer.CreateFormField("parse_mode")
+	if err != nil {
+		return 0, fmt.Errorf("failed to create parse_mode field: %w", err)
+	}
+	parseModeField.Write([]byte("HTML"))
+
+	// Add photo file
+	photoField, err := writer.CreateFormFile("photo", filepath.Base(photoPath))
+	if err != nil {
+		return 0, fmt.Errorf("failed to create form file: %w", err)
+	}
+	_, err = io.Copy(photoField, photoFile)
+	if err != nil {
+		return 0, fmt.Errorf("failed to copy photo data: %w", err)
+	}
+
+	writer.Close()
+
+	// Create HTTP request
+	client := &http.Client{
+		Timeout: 30 * time.Second, // Longer timeout for file uploads
+	}
+
+	req, err := http.NewRequest("POST", url, &requestBody)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("failed to post to Telegram: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("HTTP error: %d, response: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var telegramResp TelegramResponse
+	if err := json.Unmarshal(body, &telegramResp); err != nil {
+		return 0, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !telegramResp.OK {
+		return 0, fmt.Errorf("telegram API error: %s", telegramResp.Description)
+	}
+
+	if telegramResp.Result != nil {
+		messageID = telegramResp.Result.MessageID
+		fmt.Fprintf(os.Stderr, "Successfully posted photo to Telegram channel (message_id: %d)\n", messageID)
+	} else {
+		fmt.Fprintln(os.Stderr, "Successfully posted photo to Telegram channel")
+	}
+	return messageID, nil
+}
+
+func postMultiplePhotosToTelegram(botToken, channelID string, photoPaths []string, caption string) (firstMessageID int64, err error) {
 	// Telegram allows up to 10 media files in a media group
 	if len(photoPaths) > 10 {
-		return fmt.Errorf("maximum 10 photos allowed, got %d", len(photoPaths))
+		return 0, fmt.Errorf("maximum 10 photos allowed, got %d", len(photoPaths))
 	}
 
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMediaGroup", botToken)
@@ -403,7 +536,7 @@ func postMultiplePhotosToTelegram(botToken, channelID string, photoPaths []strin
 	// Add chat_id
 	chatIDField, err := writer.CreateFormField("chat_id")
 	if err != nil {
-		return fmt.Errorf("failed to create form field: %w", err)
+		return 0, fmt.Errorf("failed to create form field: %w", err)
 	}
 	chatIDField.Write([]byte(channelID))
 
@@ -424,20 +557,20 @@ func postMultiplePhotosToTelegram(botToken, channelID string, photoPaths []strin
 
 	mediaJSON, err := json.Marshal(media)
 	if err != nil {
-		return fmt.Errorf("failed to marshal media: %w", err)
+		return 0, fmt.Errorf("failed to marshal media: %w", err)
 	}
 
 	// Add media field
 	mediaField, err := writer.CreateFormField("media")
 	if err != nil {
-		return fmt.Errorf("failed to create media field: %w", err)
+		return 0, fmt.Errorf("failed to create media field: %w", err)
 	}
 	mediaField.Write(mediaJSON)
 
 	// Add parse_mode
 	parseModeField, err := writer.CreateFormField("parse_mode")
 	if err != nil {
-		return fmt.Errorf("failed to create parse_mode field: %w", err)
+		return 0, fmt.Errorf("failed to create parse_mode field: %w", err)
 	}
 	parseModeField.Write([]byte("HTML"))
 
@@ -445,19 +578,19 @@ func postMultiplePhotosToTelegram(botToken, channelID string, photoPaths []strin
 	for i, photoPath := range photoPaths {
 		photoFile, err := os.Open(photoPath)
 		if err != nil {
-			return fmt.Errorf("failed to open photo file %s: %w", photoPath, err)
+			return 0, fmt.Errorf("failed to open photo file %s: %w", photoPath, err)
 		}
 
 		photoField, err := writer.CreateFormFile(fmt.Sprintf("photo%d", i), filepath.Base(photoPath))
 		if err != nil {
 			photoFile.Close()
-			return fmt.Errorf("failed to create form file: %w", err)
+			return 0, fmt.Errorf("failed to create form file: %w", err)
 		}
 
 		_, err = io.Copy(photoField, photoFile)
 		photoFile.Close()
 		if err != nil {
-			return fmt.Errorf("failed to copy photo data: %w", err)
+			return 0, fmt.Errorf("failed to copy photo data: %w", err)
 		}
 	}
 
@@ -470,38 +603,47 @@ func postMultiplePhotosToTelegram(botToken, channelID string, photoPaths []strin
 
 	req, err := http.NewRequest("POST", url, &requestBody)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return 0, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to post to Telegram: %w", err)
+		return 0, fmt.Errorf("failed to post to Telegram: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("HTTP error: %d, response: %s", resp.StatusCode, string(body))
+		return 0, fmt.Errorf("HTTP error: %d, response: %s", resp.StatusCode, string(body))
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
+		return 0, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	var telegramResp TelegramResponse
-	if err := json.Unmarshal(body, &telegramResp); err != nil {
-		return fmt.Errorf("failed to parse response: %w", err)
+	var mediaResp telegramMediaGroupResponse
+	if err := json.Unmarshal(body, &mediaResp); err != nil {
+		return 0, fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	if !telegramResp.OK {
-		return fmt.Errorf("telegram API error: %s", telegramResp.Description)
+	if !mediaResp.OK {
+		return 0, fmt.Errorf("telegram API error: %s", mediaResp.Description)
 	}
 
-	fmt.Fprintf(os.Stderr, "Successfully posted %d photo(s) to Telegram channel\n", len(photoPaths))
-	return nil
+	if len(mediaResp.Result) > 0 {
+		firstMessageID = mediaResp.Result[0].MessageID
+		ids := make([]string, len(mediaResp.Result))
+		for i, m := range mediaResp.Result {
+			ids[i] = strconv.FormatInt(m.MessageID, 10)
+		}
+		fmt.Fprintf(os.Stderr, "Successfully posted %d photo(s) to Telegram channel (message_ids: %s)\n", len(photoPaths), strings.Join(ids, ", "))
+	} else {
+		fmt.Fprintf(os.Stderr, "Successfully posted %d photo(s) to Telegram channel\n", len(photoPaths))
+	}
+	return firstMessageID, nil
 }
 
 func readFileContent(filePath string) (string, error) {
@@ -1142,7 +1284,7 @@ Flags:
   -m, --morning       Get Fitbit sleep data and post to Telegram channel
   -W, --writer PATH   Read setting from file, send to OpenAI or OpenRouter (streaming), get generated content
   -o, --output PATH   Write generated content to file (use with -W)
-  -u, --update ID     Update an existing message by ID (use with -p or -f for new content)
+  -u, --update ID     Update message/caption by ID (-p/-f), or replace photo (-P with one file)
 
 Examples:
   cairn -p "Hello world #tag1 #tag2"
@@ -1156,6 +1298,8 @@ Examples:
   cairn -W prompt.txt
   cairn -W prompt.txt -o result.txt
   cairn -u 123 -p "Corrected message"
+  cairn -u 456 -p "New caption"           # update photo caption
+  cairn -u 456 -P new.jpg -p "New caption" # replace photo and caption
 `, version)
 }
 
@@ -1228,10 +1372,45 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Error: -u/--update requires a positive integer message ID")
 			os.Exit(1)
 		}
+		// Parse photo paths for "replace photo" (-u with -P and one photo)
+		var updatePhotos []string
+		if *photoPathStr != "" {
+			for _, p := range strings.Split(*photoPathStr, ",") {
+				p = strings.TrimSpace(p)
+				if p != "" {
+					updatePhotos = append(updatePhotos, p)
+				}
+			}
+			for _, p := range pflag.Args() {
+				p = strings.TrimSpace(p)
+				if p != "" {
+					updatePhotos = append(updatePhotos, p)
+				}
+			}
+		}
 		content := *postContent
 		file := *filePath
+		if len(updatePhotos) == 1 {
+			// Replace the photo itself (-u <id> -P new_photo.jpg [-p "caption"])
+			var newCaption string
+			if file != "" {
+				newCaption, err = readFileContent(file)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+			} else {
+				newCaption = content
+			}
+			if err := editMessageMediaTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, msgID, updatePhotos[0], newCaption); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+		// Edit text or caption only
 		if content == "" && file == "" {
-			fmt.Fprintln(os.Stderr, "Error: -u/--update requires -p or -f for the new content")
+			fmt.Fprintln(os.Stderr, "Error: -u/--update requires -p or -f for the new content (or -P with one photo to replace the image)")
 			os.Exit(1)
 		}
 		if content != "" && file != "" {
@@ -1248,7 +1427,11 @@ func main() {
 		} else {
 			newContent = content
 		}
-		if err := editMessageTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, msgID, newContent); err != nil {
+		err = editMessageTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, msgID, newContent)
+		if err != nil && (strings.Contains(err.Error(), "message has no text") || strings.Contains(err.Error(), "no text in the message to edit")) {
+			err = editMessageCaptionTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, msgID, newContent)
+		}
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -1308,13 +1491,13 @@ func main() {
 	if len(photos) > 0 {
 		if len(photos) == 1 {
 			// Post single photo with caption
-			if err := postPhotoToTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, photos[0], finalContent); err != nil {
+			if _, err := postPhotoToTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, photos[0], finalContent); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
 		} else {
 			// Post multiple photos with caption
-			if err := postMultiplePhotosToTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, photos, finalContent); err != nil {
+			if _, err := postMultiplePhotosToTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, photos, finalContent); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
