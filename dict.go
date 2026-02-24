@@ -4,19 +4,20 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
 
-// Free Dictionary API (https://dictionaryapi.dev/) - no API key required.
 const dictAPIBase = "https://api.dictionaryapi.dev/api/v2/entries/en"
-
-// Word list for "Did you mean?" (GitHub, no auth).
 const wordsAlphaURL = "https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt"
+const wiktionaryAPI = "https://en.wiktionary.org/w/api.php"
+const etymonlineBase = "https://www.etymonline.com/word/"
 
 var (
 	wordList     []string
@@ -27,34 +28,29 @@ type dictPhonetic struct {
 	Text  string `json:"text"`
 	Audio string `json:"audio"`
 }
-
 type dictDefinition struct {
 	Definition string   `json:"definition"`
 	Example    string   `json:"example"`
 	Synonyms   []string `json:"synonyms"`
 	Antonyms   []string `json:"antonyms"`
 }
-
 type dictMeaning struct {
 	PartOfSpeech string           `json:"partOfSpeech"`
 	Definitions  []dictDefinition `json:"definitions"`
 	Synonyms     []string         `json:"synonyms"`
 	Antonyms     []string         `json:"antonyms"`
 }
-
 type dictEntry struct {
 	Word      string         `json:"word"`
 	Phonetics []dictPhonetic `json:"phonetics"`
 	Meanings  []dictMeaning  `json:"meanings"`
 }
-
 type dictError struct {
-	Title  string `json:"title"`
-	Message string `json:"message"`
+	Title      string `json:"title"`
+	Message    string `json:"message"`
 	Resolution string `json:"resolution"`
 }
 
-// loadWordList fetches the English word list from GitHub and caches it.
 func loadWordList() ([]string, error) {
 	var loadErr error
 	wordListOnce.Do(func() {
@@ -88,7 +84,6 @@ func loadWordList() ([]string, error) {
 	return wordList, nil
 }
 
-// levenshtein returns the edit distance between a and b.
 func levenshtein(a, b string) int {
 	ra, rb := []rune(a), []rune(b)
 	na, nb := len(ra), len(rb)
@@ -98,7 +93,6 @@ func levenshtein(a, b string) int {
 	if nb == 0 {
 		return na
 	}
-	// dp[i][j] = distance between a[:i] and b[:j]
 	prev := make([]int, nb+1)
 	curr := make([]int, nb+1)
 	for j := 0; j <= nb; j++ {
@@ -117,7 +111,6 @@ func levenshtein(a, b string) int {
 	}
 	return prev[nb]
 }
-
 func min(a, b int) int {
 	if a < b {
 		return a
@@ -125,7 +118,6 @@ func min(a, b int) int {
 	return b
 }
 
-// suggestClosest returns the closest word from the list within maxEditDistance, and true if found.
 func suggestClosest(word string, maxEditDistance int) (string, bool) {
 	list, err := loadWordList()
 	if err != nil || len(list) == 0 {
@@ -148,7 +140,6 @@ func suggestClosest(word string, maxEditDistance int) (string, bool) {
 		if w == word {
 			return w, true
 		}
-		// Narrow: same first letter and similar length
 		rw := []rune(w)
 		if first != "" && (len(rw) == 0 || string(rw[0]) != first) {
 			continue
@@ -161,7 +152,6 @@ func suggestClosest(word string, maxEditDistance int) (string, bool) {
 		if d > maxEditDistance {
 			continue
 		}
-		// Prefer smaller distance; on tie, prefer same length (e.g. "absorb" over "abord" for "absord")
 		sameLen := len(rw) == wordLen
 		bestSameLen := bestWord != "" && len([]rune(bestWord)) == wordLen
 		update := d < bestDist || (d == bestDist && sameLen && !bestSameLen)
@@ -176,8 +166,226 @@ func suggestClosest(word string, maxEditDistance int) (string, bool) {
 	return "", false
 }
 
-// Dict looks up the word via the Free Dictionary API and prints its meaning to stdout.
-// On typo (404), suggests a close match and shows its definition.
+// fetchEtymonlineEtymology fetches etymology from Etymonline (authoritative source).
+// Parses the meta description which contains a short etymology; no API key needed.
+func fetchEtymonlineEtymology(word string) (string, error) {
+	word = strings.TrimSpace(strings.ToLower(word))
+	if word == "" {
+		return "", fmt.Errorf("no word")
+	}
+	u := etymonlineBase + url.PathEscape(word)
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "cairn/1.0 (CLI dictionary tool; etymology)")
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("etymonline returned %s", resp.Status)
+	}
+	// If we were redirected to a different word (e.g. /word/advertise → /word/advert), don't use this content
+	if resp.Request != nil && resp.Request.URL != nil {
+		path := strings.TrimSuffix(resp.Request.URL.Path, "/")
+		parts := strings.Split(path, "/")
+		if len(parts) >= 1 {
+			finalWord := strings.ToLower(parts[len(parts)-1])
+			if finalWord != word {
+				return "", nil
+			}
+		}
+	}
+	// Read body (reasonably sized) to parse meta description
+	const maxBody = 64 * 1024
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	if err != nil {
+		return "", err
+	}
+	html := string(body)
+	// Meta description contains short etymology: content="...from Latin... See origin..."
+	re := regexp.MustCompile(`<meta name="description" content="([^"]+)"`)
+	m := re.FindStringSubmatch(html)
+	if len(m) < 2 {
+		re = regexp.MustCompile(`<meta property="og:description" content="([^"]+)"`)
+		m = re.FindStringSubmatch(html)
+	}
+	if len(m) < 2 {
+		return "", nil
+	}
+	etym := m[1]
+	// Remove trailing " See origin and meaning of X."
+	if idx := strings.Index(etym, " See origin"); idx > 0 {
+		etym = etym[:idx]
+	}
+	etym = strings.TrimSpace(etym)
+	if etym == "" {
+		return "", nil
+	}
+	// Decode common HTML entities
+	etym = strings.ReplaceAll(etym, "&quot;", "\"")
+	etym = strings.ReplaceAll(etym, "&amp;", "&")
+	etym = strings.ReplaceAll(etym, "&#39;", "'")
+	etym = strings.ReplaceAll(etym, "&hellip;", "...")
+	return etym, nil
+}
+
+func fetchWiktionaryEtymology(word string) (etym string, example string, err error) {
+	word = strings.TrimSpace(strings.ToLower(word))
+	if word == "" {
+		return "", "", fmt.Errorf("no word")
+	}
+	u := wiktionaryAPI + "?action=query&prop=revisions&rvprop=content&rvslots=main&format=json&titles=" + url.QueryEscape(word)
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("User-Agent", "cairn/1.0 (CLI dictionary tool; etymology lookup)")
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("wiktionary returned %s", resp.Status)
+	}
+	var out struct {
+		Query struct {
+			Pages map[string]struct {
+				Revisions []struct {
+					Slots struct {
+						Main struct {
+							Star string `json:"*"`
+						} `json:"main"`
+					} `json:"slots"`
+				} `json:"revisions"`
+			} `json:"pages"`
+		} `json:"query"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", "", err
+	}
+	for _, p := range out.Query.Pages {
+		if len(p.Revisions) == 0 {
+			return "", "", nil
+		}
+		raw := strings.TrimSpace(p.Revisions[0].Slots.Main.Star)
+		if raw == "" {
+			return "", "", nil
+		}
+		etym = extractAndCleanEtymology(raw)
+		example = extractWiktionaryExample(raw)
+		return etym, example, nil
+	}
+	return "", "", nil
+}
+
+func extractAndCleanEtymology(wikitext string) string {
+	wikitext = strings.ReplaceAll(wikitext, "\r\n", "\n")
+	wikitext = strings.ReplaceAll(wikitext, "\r", "\n")
+	etymRegex := regexp.MustCompile(`(?m)^===Etymology(?:\s+\d+)?===\s*\n([\s\S]*?)(?:\n===|$)`)
+
+	englishBlock := regexp.MustCompile(`(?m)^==English==\s*\n([\s\S]*?)(?:\n==[^=\n][^\n]*|$)`).FindStringSubmatch(wikitext)
+	if len(englishBlock) >= 2 && englishBlock[1] != "" {
+		section := englishBlock[1]
+		all := etymRegex.FindAllStringSubmatch(section, -1)
+		if len(all) > 0 {
+			return joinEtymologyParts(all)
+		}
+	}
+	// Fallback: use only the first ===Etymology=== on the page (almost always English).
+	all := etymRegex.FindAllStringSubmatch(wikitext, 1)
+	if len(all) > 0 {
+		return joinEtymologyParts(all)
+	}
+	return ""
+}
+
+func joinEtymologyParts(all [][]string) string {
+	var parts []string
+	for _, m := range all {
+		if len(m) < 2 {
+			continue
+		}
+		raw := strings.TrimSpace(m[1])
+		if raw != "" {
+			parts = append(parts, cleanEtymologyWikitext(raw))
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func extractWiktionaryExample(wikitext string) string {
+	wikitext = strings.ReplaceAll(wikitext, "\r\n", "\n")
+	wikitext = strings.ReplaceAll(wikitext, "\r", "\n")
+	englishBlock := regexp.MustCompile(`(?m)^==English==\s*\n([\s\S]*?)(?:\n==[^=\n][^\n]*|$)`).FindStringSubmatch(wikitext)
+	if len(englishBlock) < 2 {
+		return ""
+	}
+	section := englishBlock[1]
+	if m := regexp.MustCompile(`\{\{ux\|en\|([^}|]+)(?:\|[^}]*)?\}\}`).FindStringSubmatch(section); len(m) >= 2 {
+		return cleanExampleText(m[1])
+	}
+	if m := regexp.MustCompile(`\|passage=([^}|]+)(?:\|[^}]*)?\}\}`).FindStringSubmatch(section); len(m) >= 2 {
+		ex := m[1]
+		if len(ex) > 300 {
+			ex = ex[:297] + "..."
+		}
+		return cleanExampleText(ex)
+	}
+	if m := regexp.MustCompile(`(?m)^#:\s*([^\n]+)`).FindStringSubmatch(section); len(m) >= 2 {
+		ex := strings.TrimSpace(m[1])
+		if idx := strings.Index(ex, "{{"); idx > 0 {
+			ex = strings.TrimSpace(ex[:idx])
+		}
+		if ex != "" && len(ex) > 20 {
+			if len(ex) > 280 {
+				ex = ex[:277] + "..."
+			}
+			return cleanExampleText(ex)
+		}
+	}
+	return ""
+}
+
+func cleanExampleText(s string) string {
+	s = strings.TrimSpace(s)
+	s = regexp.MustCompile(`'''([^']*)'''`).ReplaceAllString(s, "$1")
+	s = regexp.MustCompile(`\[\[([^\]|]+)(?:\|[^\]]+)?\]\]`).ReplaceAllString(s, "$1")
+	return strings.TrimSpace(s)
+}
+
+func cleanEtymologyWikitext(s string) string {
+	s = regexp.MustCompile(`\{\{inh\|[^|]*\|enm\|([^}|]+)\}\}`).ReplaceAllString(s, "Middle English $1")
+	s = regexp.MustCompile(`\{\{inh\|[^|]*\|ang\|([^}|]+)\}\}`).ReplaceAllString(s, "Old English $1")
+	s = regexp.MustCompile(`\{\{inh\|[^|]*\|fro\|([^}|]+)\}\}`).ReplaceAllString(s, "Old French $1")
+	s = regexp.MustCompile(`\{\{inh\|[^|]*\|la\|([^}|]+)\}\}`).ReplaceAllString(s, "Latin $1")
+	s = regexp.MustCompile(`\{\{inh\|[^|]*\|grc\|([^}|]+)\}\}`).ReplaceAllString(s, "Ancient Greek $1")
+	s = regexp.MustCompile(`\{\{inh\|[^|]*\|[^|]*\|([^}|]+)\}\}`).ReplaceAllString(s, "$1")
+	s = regexp.MustCompile(`\{\{der\|[^|]*\|fro\|([^}|]+)\}\}`).ReplaceAllString(s, "Old French $1")
+	s = regexp.MustCompile(`\{\{der\|[^|]*\|la\|([^}|]+)\}\}`).ReplaceAllString(s, "Latin $1")
+	s = regexp.MustCompile(`\{\{der\|[^|]*\|enm\|([^}|]+)\}\}`).ReplaceAllString(s, "Middle English $1")
+	s = regexp.MustCompile(`\{\{der\|[^|]*\|grc\|([^}|]+)\}\}`).ReplaceAllString(s, "Ancient Greek $1")
+	s = regexp.MustCompile(`\{\{der\|[^|]*\|[^|]*\|([^}|]+)\}\}`).ReplaceAllString(s, "$1")
+	s = regexp.MustCompile(`\{\{m\|[^|]*\|([^}|]+)(?:\|[^}]*)?\}\}`).ReplaceAllString(s, "$1")
+	s = regexp.MustCompile(`\{\{l\|[^|]*\|([^}|]+)\}\}`).ReplaceAllString(s, "$1")
+	s = regexp.MustCompile(`\{\{cog\|[^|]*\|([^}|]+)\}\}`).ReplaceAllString(s, "$1")
+	s = regexp.MustCompile(`\{\{ncog\|[^|]*\|([^}|]+)\}\}`).ReplaceAllString(s, "$1")
+	s = regexp.MustCompile(`\[\[w:[^\]|]*(?:\|([^\]]+))?\]\]`).ReplaceAllString(s, "$1")
+	s = regexp.MustCompile(`\[\[([^\]|]+)(?:\|[^\]]+)?\]\]`).ReplaceAllString(s, "$1")
+	s = regexp.MustCompile(`''([^']*)''`).ReplaceAllString(s, "$1")
+	s = regexp.MustCompile(`<ref[^>]*>[\s\S]*?</ref>`).ReplaceAllString(s, "")
+	s = regexp.MustCompile(`<ref[^>]*/>`).ReplaceAllString(s, "")
+	s = regexp.MustCompile(`\{\{[^}]*\}\}`).ReplaceAllString(s, "")
+	s = regexp.MustCompile(`\n{3,}`).ReplaceAllString(s, "\n\n")
+	s = regexp.MustCompile(`[ \t]+`).ReplaceAllString(s, " ")
+	return strings.TrimSpace(s)
+}
+
 func Dict(word string) error {
 	return dictLookup(word, true)
 }
@@ -194,7 +402,6 @@ func dictLookup(word string, allowSuggest bool) error {
 		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode == http.StatusNotFound {
 		if allowSuggest {
 			if suggestion, ok := suggestClosest(word, 3); ok {
@@ -212,7 +419,6 @@ func dictLookup(word string, allowSuggest bool) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("dictionary API returned %s", resp.Status)
 	}
-
 	var entries []dictEntry
 	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
 		return fmt.Errorf("decode response: %w", err)
@@ -220,17 +426,13 @@ func dictLookup(word string, allowSuggest bool) error {
 	if len(entries) == 0 {
 		return fmt.Errorf("no definition for %q", word)
 	}
-
 	printDictEntries(os.Stdout, entries)
 	return nil
 }
 
 func printDictEntries(out *os.File, entries []dictEntry) {
 	for _, e := range entries {
-		// Headword
 		fmt.Fprintf(out, "\n%s", strings.ToLower(e.Word))
-
-		// Phonetics (first with text)
 		var phonetics []string
 		for _, p := range e.Phonetics {
 			if p.Text != "" {
@@ -242,7 +444,31 @@ func printDictEntries(out *os.File, entries []dictEntry) {
 		} else {
 			fmt.Fprintln(out)
 		}
-
+			// Etymology: fetch both; prefer Wiktionary when it has longer (full) text
+		etym, _ := fetchEtymonlineEtymology(e.Word)
+		wiktionaryEtym, wiktionaryExample, wikErr := fetchWiktionaryEtymology(e.Word)
+		if wikErr != nil && etym == "" {
+			fmt.Fprintf(os.Stderr, "  (Etymology unavailable: %v)\n", wikErr)
+		}
+		if wiktionaryEtym != "" && (etym == "" || len(wiktionaryEtym) > len(etym)) {
+			etym = wiktionaryEtym
+		}
+		if etym != "" {
+			fmt.Fprintf(out, "\n  Etymology:\n")
+			for _, line := range strings.Split(etym, "\n") {
+				line = strings.TrimSpace(line)
+				if line != "" {
+					fmt.Fprintf(out, "    %s\n", line)
+				}
+			}
+			// If still truncated (from Etymonline meta), point to full entry
+			if strings.HasSuffix(etym, "…") || strings.HasSuffix(etym, "...") {
+				fmt.Fprintf(out, "    (Full entry: %s%s)\n", etymonlineBase, url.PathEscape(strings.ToLower(e.Word)))
+			}
+		}
+		if wiktionaryExample != "" {
+			fmt.Fprintf(out, "\n  Example: %s\n", wiktionaryExample)
+		}
 		var allExamples []string
 		for _, m := range e.Meanings {
 			fmt.Fprintf(out, "\n  [%s]\n", m.PartOfSpeech)
@@ -264,23 +490,19 @@ func printDictEntries(out *os.File, entries []dictEntry) {
 				fmt.Fprintf(out, "    Antonyms: %s\n", strings.Join(m.Antonyms, ", "))
 			}
 		}
-
-		// Examples section (deduplicated)
-		if len(allExamples) > 0 {
-			seen := make(map[string]bool)
-			var uniq []string
-			for _, ex := range allExamples {
-				ex = strings.TrimSpace(ex)
-				if ex != "" && !seen[ex] {
-					seen[ex] = true
-					uniq = append(uniq, ex)
-				}
+		seen := make(map[string]bool)
+		var uniq []string
+		for _, ex := range allExamples {
+			ex = strings.TrimSpace(ex)
+			if ex != "" && !seen[ex] {
+				seen[ex] = true
+				uniq = append(uniq, ex)
 			}
-			if len(uniq) > 0 {
-				fmt.Fprintf(out, "\n  Examples:\n")
-				for _, ex := range uniq {
-					fmt.Fprintf(out, "    • %s\n", ex)
-				}
+		}
+		if len(uniq) > 0 {
+			fmt.Fprintf(out, "\n  Examples:\n")
+			for _, ex := range uniq {
+				fmt.Fprintf(out, "    • %s\n", ex)
 			}
 		}
 	}
