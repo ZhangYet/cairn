@@ -2,16 +2,20 @@ package main
 
 import (
 	"bufio"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 const dictAPIBase = "https://api.dictionaryapi.dev/api/v2/entries/en"
@@ -23,6 +27,210 @@ var (
 	wordList     []string
 	wordListOnce sync.Once
 )
+
+// dictDBPath returns the path to the local SQLite DB for saved dictionary words.
+func dictDBPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".cairn_dict.db"), nil
+}
+
+func initDictDB() (*sql.DB, error) {
+	p, err := dictDBPath()
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", p)
+	if err != nil {
+		return nil, err
+	}
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS dict_words (word TEXT PRIMARY KEY, created_at TEXT)`)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+func saveDictWord(word string) {
+	word = strings.TrimSpace(strings.ToLower(word))
+	if word == "" {
+		return
+	}
+	db, err := initDictDB()
+	if err != nil {
+		return
+	}
+	defer db.Close()
+	// REPLACE so re-looking-up a word updates created_at and it counts as "recent" again
+	_, _ = db.Exec(`INSERT OR REPLACE INTO dict_words (word, created_at) VALUES (?, datetime('now'))`, word)
+}
+
+func loadDictWords() map[string]bool {
+	db, err := initDictDB()
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT word FROM dict_words`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	m := make(map[string]bool)
+	for rows.Next() {
+		var w string
+		if err := rows.Scan(&w); err != nil {
+			continue
+		}
+		m[strings.ToLower(w)] = true
+	}
+	return m
+}
+
+// loadRecentDictWords returns the n most recently looked-up words (for highlighting only).
+func loadRecentDictWords(n int) map[string]bool {
+	if n <= 0 {
+		return nil
+	}
+	db, err := initDictDB()
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT word FROM dict_words ORDER BY created_at DESC LIMIT ?`, n)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	m := make(map[string]bool)
+	for rows.Next() {
+		var w string
+		if err := rows.Scan(&w); err != nil {
+			continue
+		}
+		m[strings.ToLower(w)] = true
+	}
+	return m
+}
+
+// wordBaseForms returns the word and possible base forms for variation matching (e.g. running -> run, words -> word).
+func wordBaseForms(w string) []string {
+	w = strings.ToLower(w)
+	if w == "" {
+		return nil
+	}
+	candidates := []string{w}
+	// -ies -> -y (berries -> berry)
+	if len(w) > 3 && strings.HasSuffix(w, "ies") {
+		candidates = append(candidates, w[:len(w)-3]+"y")
+	}
+	// -ied -> -y (tried -> try)
+	if len(w) > 3 && strings.HasSuffix(w, "ied") {
+		candidates = append(candidates, w[:len(w)-3]+"y")
+	}
+	// -ing (running -> run, being -> be)
+	if len(w) > 4 && strings.HasSuffix(w, "ing") {
+		base := w[:len(w)-3]
+		candidates = append(candidates, base)
+		if len(base) > 1 && base[len(base)-1] == base[len(base)-2] {
+			candidates = append(candidates, base[:len(base)-1])
+		}
+	}
+	// -ed (played -> play, stopped -> stop)
+	if len(w) > 3 && strings.HasSuffix(w, "ed") {
+		base := w[:len(w)-2]
+		candidates = append(candidates, base)
+		if len(base) > 1 && base[len(base)-1] == base[len(base)-2] {
+			candidates = append(candidates, base[:len(base)-1])
+		}
+	}
+	// -es (watches -> watch, goes -> go)
+	if len(w) > 2 && strings.HasSuffix(w, "es") {
+		candidates = append(candidates, w[:len(w)-2])
+	}
+	// -s (words -> word)
+	if len(w) > 1 && strings.HasSuffix(w, "s") && !strings.HasSuffix(w, "ss") {
+		candidates = append(candidates, w[:len(w)-1])
+	}
+	// -er (runner -> run, bigger -> big)
+	if len(w) > 3 && strings.HasSuffix(w, "er") {
+		candidates = append(candidates, w[:len(w)-2])
+		if len(w) > 4 && w[len(w)-3] == w[len(w)-4] {
+			candidates = append(candidates, w[:len(w)-3])
+		}
+	}
+	// -est (fastest -> fast)
+	if len(w) > 4 && strings.HasSuffix(w, "est") {
+		candidates = append(candidates, w[:len(w)-3])
+		if len(w) > 5 && w[len(w)-4] == w[len(w)-5] {
+			candidates = append(candidates, w[:len(w)-4])
+		}
+	}
+	// -ly (quickly -> quick)
+	if len(w) > 3 && strings.HasSuffix(w, "ly") {
+		candidates = append(candidates, w[:len(w)-2])
+	}
+	return candidates
+}
+
+func shouldHighlightWord(token string, saved map[string]bool) bool {
+	if saved == nil || len(token) == 0 {
+		return false
+	}
+	for _, base := range wordBaseForms(token) {
+		if saved[base] {
+			return true
+		}
+	}
+	return false
+}
+
+var wordTokenRe = regexp.MustCompile(`[A-Za-z]+(?:'[A-Za-z]+)?`)
+
+// ANSI codes for highlighting when stdout is a TTY
+const (
+	ansiBoldGreen = "\033[1;32m" // word we're currently searching
+	ansiBoldCyan  = "\033[1;36m" // words we searched before (recent 3)
+	ansiReset     = "\033[0m"
+)
+
+func isTerminal(f *os.File) bool {
+	if f == nil {
+		return false
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
+}
+
+// highlightText highlights the current-search word in one color and previously searched words in another.
+// currentWords = word we're looking up (and its variations); previousWords = recent 3 from DB.
+func highlightText(text string, currentWords, previousWords map[string]bool, useColor bool) string {
+	hasAny := (len(currentWords) > 0 || len(previousWords) > 0)
+	if !hasAny {
+		return text
+	}
+	return wordTokenRe.ReplaceAllStringFunc(text, func(match string) string {
+		if shouldHighlightWord(match, currentWords) {
+			if useColor {
+				return ansiBoldGreen + match + ansiReset
+			}
+			return "**" + match + "**"
+		}
+		if shouldHighlightWord(match, previousWords) {
+			if useColor {
+				return ansiBoldCyan + match + ansiReset
+			}
+			return "**" + match + "**"
+		}
+		return match
+	})
+}
 
 type dictPhonetic struct {
 	Text  string `json:"text"`
@@ -431,7 +639,10 @@ func dictLookup(word string, allowSuggest bool) error {
 }
 
 func printDictEntries(out *os.File, entries []dictEntry) {
+	previous := loadRecentDictWords(3) // words we searched before (highlight in cyan)
+	useColor := isTerminal(out)
 	for _, e := range entries {
+		current := map[string]bool{strings.ToLower(e.Word): true} // word we're searching (highlight in green)
 		fmt.Fprintf(out, "\n%s", strings.ToLower(e.Word))
 		var phonetics []string
 		for _, p := range e.Phonetics {
@@ -458,7 +669,7 @@ func printDictEntries(out *os.File, entries []dictEntry) {
 			for _, line := range strings.Split(etym, "\n") {
 				line = strings.TrimSpace(line)
 				if line != "" {
-					fmt.Fprintf(out, "    %s\n", line)
+					fmt.Fprintf(out, "    %s\n", highlightText(line, current, previous, useColor))
 				}
 			}
 			// If still truncated (from Etymonline meta), point to full entry
@@ -467,27 +678,27 @@ func printDictEntries(out *os.File, entries []dictEntry) {
 			}
 		}
 		if wiktionaryExample != "" {
-			fmt.Fprintf(out, "\n  Example: %s\n", wiktionaryExample)
+			fmt.Fprintf(out, "\n  Example: %s\n", highlightText(wiktionaryExample, current, previous, useColor))
 		}
 		var allExamples []string
 		for _, m := range e.Meanings {
 			fmt.Fprintf(out, "\n  [%s]\n", m.PartOfSpeech)
 			for i, d := range m.Definitions {
-				fmt.Fprintf(out, "    %d. %s\n", i+1, d.Definition)
+				fmt.Fprintf(out, "    %d. %s\n", i+1, highlightText(d.Definition, current, previous, useColor))
 				if d.Example != "" {
 					ex := strings.TrimSpace(d.Example)
 					if !strings.HasPrefix(ex, "\"") && !strings.HasPrefix(ex, "'") {
 						ex = "\"" + ex + "\""
 					}
-					fmt.Fprintf(out, "       Example: %s\n", ex)
+					fmt.Fprintf(out, "       Example: %s\n", highlightText(ex, current, previous, useColor))
 					allExamples = append(allExamples, strings.TrimSpace(d.Example))
 				}
 			}
 			if len(m.Synonyms) > 0 {
-				fmt.Fprintf(out, "    Synonyms: %s\n", strings.Join(m.Synonyms, ", "))
+				fmt.Fprintf(out, "    Synonyms: %s\n", highlightText(strings.Join(m.Synonyms, ", "), current, previous, useColor))
 			}
 			if len(m.Antonyms) > 0 {
-				fmt.Fprintf(out, "    Antonyms: %s\n", strings.Join(m.Antonyms, ", "))
+				fmt.Fprintf(out, "    Antonyms: %s\n", highlightText(strings.Join(m.Antonyms, ", "), current, previous, useColor))
 			}
 		}
 		seen := make(map[string]bool)
@@ -502,9 +713,10 @@ func printDictEntries(out *os.File, entries []dictEntry) {
 		if len(uniq) > 0 {
 			fmt.Fprintf(out, "\n  Examples:\n")
 			for _, ex := range uniq {
-				fmt.Fprintf(out, "    • %s\n", ex)
+				fmt.Fprintf(out, "    • %s\n", highlightText(ex, current, previous, useColor))
 			}
 		}
+		saveDictWord(e.Word)
 	}
 	fmt.Fprintln(out)
 }
