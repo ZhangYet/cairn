@@ -27,6 +27,7 @@ Flags:
   -m, --morning       Get Fitbit sleep data and post to Telegram channel
   -W, --writer PATH   Read setting from file, send to OpenAI or OpenRouter (streaming), get generated content
   -o, --output PATH   Write generated content to file (use with -W)
+  -d, --dict WORD     Look up word meaning (Free Dictionary API)
   -u, --update ID     Update message/caption by ID (-p/-f), or replace photo (-P with one file)
 
 Examples:
@@ -40,6 +41,8 @@ Examples:
   cairn --morning
   cairn -W prompt.txt
   cairn -W prompt.txt -o result.txt
+  cairn -d hello
+  cairn --dict word
   cairn -u 123 -p "Corrected message"
   cairn -u 456 -p "New caption"           # update photo caption
   cairn -u 456 -P new.jpg -p "New caption" # replace photo and caption
@@ -54,6 +57,7 @@ func main() {
 	morning := pflag.BoolP("morning", "m", false, "Get Fitbit sleep data and post to Telegram channel")
 	writerPath := pflag.StringP("writer", "W", "", "Read setting from file, send to OpenRouter (streaming), get generated content")
 	outputPath := pflag.StringP("output", "o", "", "Write generated content to file (use with -W)")
+	dictWord := pflag.StringP("dict", "d", "", "Look up word meaning")
 	updateMsgID := pflag.StringP("update", "u", "", "Message ID to update (use with -p or -f for new content)")
 	help := pflag.BoolP("help", "h", false, "Show help message")
 
@@ -92,6 +96,22 @@ func main() {
 
 	if *writerPath != "" {
 		if err := Writer(config, *writerPath, *outputPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if pflag.Lookup("dict").Changed {
+		word := *dictWord
+		if word == "" && pflag.NArg() > 0 {
+			word = pflag.Arg(0)
+		}
+		if word == "" {
+			fmt.Fprintln(os.Stderr, "Error: -d/--dict requires a word (e.g. cairn -d hello)")
+			os.Exit(1)
+		}
+		if err := Dict(word); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
