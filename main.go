@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/pflag"
 )
 
-const version = "0.1.3"
+const version = "0.2.0"
 
 func printHelp() {
 	fmt.Printf(`cairn - A command-line tool to post content to Telegram channels

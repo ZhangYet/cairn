@@ -2,7 +2,7 @@
 
 A command-line tool for posting to Telegram channels, syncing Fitbit sleep data, and generating text with LLM APIs (OpenAI or OpenRouter).
 
-**Version:** 0.1.3
+**Version:** 0.2.0
 
 ## Features
 
