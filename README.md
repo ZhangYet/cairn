@@ -9,6 +9,7 @@ A command-line tool for posting to Telegram channels, syncing Fitbit sleep data,
 1. **Telegram channel posting** — Post text or photos to a channel. Edit or replace messages by ID. All posts get a `#cairn` tag.
 2. **Fitbit morning summary** — Fetch today’s sleep data from Fitbit and post a formatted summary (and optional extra text) to your channel. Uses OAuth2 with PKCE; tokens are stored locally.
 3. **LLM writer** — Read a prompt from a file, call OpenAI or OpenRouter (streaming), and optionally save the result to a file. Configure one provider in config; OpenAI is used if both are set.
+4. **Dictionary** — Look up word meanings via the [Free Dictionary API](https://dictionaryapi.dev/) (no API key). Use `-d`/`--dict` with a word.
 
 ## Requirements
 
@@ -112,6 +113,16 @@ cairn -W prompt.txt -o result.txt
 
 Prompt file content is sent as the user message; the model reply is streamed. Configure either `[openai]` or `[openrouter]` (or both; OpenAI wins) in config.
 
+### Dictionary
+
+```bash
+# Look up a word (uses Free Dictionary API; no config needed)
+cairn -d hello
+cairn --dict serendipity
+```
+
+Prints definitions, phonetics, part of speech, examples, and synonyms/antonyms when available.
+
 ## Flags
 
 | Flag | Short | Description |
@@ -123,6 +134,7 @@ Prompt file content is sent as the user message; the model reply is streamed. Co
 | `--morning` | `-m` | Fitbit sleep → channel |
 | `--writer` | `-W` | Prompt file for LLM (OpenAI/OpenRouter) |
 | `--output` | `-o` | Output file for writer result (use with `-W`) |
+| `--dict` | `-d` | Look up word meaning (Free Dictionary API) |
 | `--update` | `-u` | Message ID to edit (text/caption or replace photo with `-P`) |
 | `--help` | `-h` | Show help |
 
