@@ -128,4 +128,5 @@ Prompt file content is sent as the user message; the model reply is streamed. Co
 
 ## License
 
-Use and modify as you like.
+This project is licensed under the GNU General Public License v3.0 (GPL-3.0).  
+See [LICENSE](LICENSE) for the full text.
