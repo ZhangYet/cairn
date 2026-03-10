@@ -179,7 +179,9 @@ func refreshFitbitToken(clientID, clientSecret, refreshToken string) (*FitbitTok
 	}, nil
 }
 
-func getValidFitbitToken(clientID, clientSecret string) (string, error) {
+// getValidFitbitToken returns a valid access token, refreshing if needed. If the token was refreshed,
+// afterRefresh is called (e.g. to scp the token file to a remote server).
+func getValidFitbitToken(clientID, clientSecret string, afterRefresh func()) (string, error) {
 	tokens, err := loadFitbitTokens()
 	if err != nil {
 		return "", err
@@ -188,6 +190,7 @@ func getValidFitbitToken(clientID, clientSecret string) (string, error) {
 		return "", fmt.Errorf("no Fitbit tokens found. Please run authorization first")
 	}
 	if time.Now().Add(5 * time.Minute).After(tokens.ExpiresAt) {
+		fmt.Fprintln(os.Stderr, "[Fitbit] Token expired or expiring soon, refreshing...")
 		newTokens, err := refreshFitbitToken(clientID, clientSecret, tokens.RefreshToken)
 		if err != nil {
 			if strings.Contains(err.Error(), "invalid_grant") || strings.Contains(err.Error(), "Refresh token invalid") {
@@ -196,10 +199,46 @@ func getValidFitbitToken(clientID, clientSecret string) (string, error) {
 			}
 			return "", fmt.Errorf("failed to refresh token: %w", err)
 		}
-		saveFitbitTokens(newTokens)
+		fmt.Fprintln(os.Stderr, "[Fitbit] Token refreshed, saving to local file...")
+		if err := saveFitbitTokens(newTokens); err != nil {
+			return "", fmt.Errorf("failed to save refreshed token: %w", err)
+		}
+		if afterRefresh != nil {
+			fmt.Fprintln(os.Stderr, "[Fitbit] Running post-refresh hook (e.g. scp to remote)...")
+			afterRefresh()
+		} else {
+			fmt.Fprintln(os.Stderr, "[Fitbit] No post-refresh hook configured (fitbit.scp_host not set).")
+		}
 		return newTokens.AccessToken, nil
 	}
+	fmt.Fprintln(os.Stderr, "[Fitbit] Token still valid, using cached token (no refresh, no scp).")
 	return tokens.AccessToken, nil
+}
+
+// scpFitbitTokensToRemote copies the local Fitbit token file to host via scp (e.g. user@ip:path).
+// remotePath defaults to "~/.cairn_fitbit_tokens.json" if empty.
+func scpFitbitTokensToRemote(host, remotePath string) error {
+	if host == "" {
+		fmt.Fprintln(os.Stderr, "[Fitbit] scp skipped: scp_host is empty.")
+		return nil
+	}
+	localPath, err := getTokenFilePath()
+	if err != nil {
+		return err
+	}
+	if remotePath == "" {
+		remotePath = "~/.cairn_fitbit_tokens.json"
+	}
+	dest := host + ":" + remotePath
+	fmt.Fprintf(os.Stderr, "[Fitbit] scp %s -> %s\n", localPath, dest)
+	cmd := exec.Command("scp", localPath, dest)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("scp token to %s: %w", dest, err)
+	}
+	fmt.Fprintln(os.Stderr, "[Fitbit] scp done: token file updated on remote.")
+	return nil
 }
 
 func authorizeFitbit(clientID, clientSecret, callbackURL string) error {
@@ -405,7 +444,17 @@ func Morning(config *Config, additionalText string) error {
 	if config.Fitbit.ClientSecret == "" {
 		return fmt.Errorf("'fitbit.client_secret' not found in config file")
 	}
-	accessToken, err := getValidFitbitToken(config.Fitbit.ClientID, config.Fitbit.ClientSecret)
+	var afterRefresh func()
+	if config.Fitbit.ScpHost != "" {
+		fmt.Fprintf(os.Stderr, "[Fitbit] scp_host set to %q; will copy token to remote after refresh.\n", config.Fitbit.ScpHost)
+		host, path := config.Fitbit.ScpHost, config.Fitbit.ScpPath
+		afterRefresh = func() {
+			if err := scpFitbitTokensToRemote(host, path); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+			}
+		}
+	}
+	accessToken, err := getValidFitbitToken(config.Fitbit.ClientID, config.Fitbit.ClientSecret, afterRefresh)
 	if err != nil {
 		if strings.Contains(err.Error(), "no Fitbit tokens found") {
 			callbackURL := "http://127.0.0.1:8765/callback"
@@ -413,7 +462,7 @@ func Morning(config *Config, additionalText string) error {
 			if err := authorizeFitbit(config.Fitbit.ClientID, config.Fitbit.ClientSecret, callbackURL); err != nil {
 				return fmt.Errorf("authorization failed: %w", err)
 			}
-			accessToken, err = getValidFitbitToken(config.Fitbit.ClientID, config.Fitbit.ClientSecret)
+			accessToken, err = getValidFitbitToken(config.Fitbit.ClientID, config.Fitbit.ClientSecret, afterRefresh)
 			if err != nil {
 				return fmt.Errorf("failed to get token after authorization: %w", err)
 			}

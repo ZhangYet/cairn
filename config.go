@@ -26,6 +26,10 @@ type TelegramConfig struct {
 type FitbitConfig struct {
 	ClientID     string `toml:"client_id"`
 	ClientSecret string `toml:"client_secret"`
+	// Optional: after refreshing the token, scp the token file to this host (e.g. "user@192.168.1.1").
+	ScpHost string `toml:"scp_host"`
+	// Optional: remote path for the token file (default "~/.cairn_fitbit_tokens.json").
+	ScpPath string `toml:"scp_path"`
 }
 
 // OpenRouterConfig is the [openrouter] section.
