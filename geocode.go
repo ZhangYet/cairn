@@ -89,6 +89,32 @@ func geocodeOne(apiKey, query string) (address, lat, lng string, err error) {
 	}
 }
 
+// readPlacesFromFile returns non-empty lines as place names. Blank lines and lines whose
+// first non-space character is # are skipped. A UTF-8 BOM on a line is stripped.
+// path "-" reads from stdin.
+func readPlacesFromFile(path string) ([]string, error) {
+	var data []byte
+	var err error
+	if path == "-" {
+		data, err = io.ReadAll(os.Stdin)
+	} else {
+		data, err = os.ReadFile(path)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read places file: %w", err)
+	}
+	var out []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.TrimPrefix(line, "\ufeff")
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out, nil
+}
+
 // GeocodePlaces resolves each query with the Google Geocoding API and prints a table.
 // On ZERO_RESULTS, address and coordinates are left blank for that row.
 func GeocodePlaces(cfg *Config, queries []string) error {

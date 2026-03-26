@@ -28,7 +28,7 @@ Flags:
   -W, --writer PATH   Read setting from file, send to OpenAI or OpenRouter (streaming), get generated content
   -o, --output PATH   Write generated content to file (use with -W)
   -d, --dict WORD     Look up word meaning (Free Dictionary API)
-  -L, --place QUERY   Geocode place(s) via Google Maps ([google] api_key in config); extra args are more places
+  -F, --places-file PATH  Geocode places from file, one per line ([google] api_key); use - for stdin
   -u, --update ID     Update message/caption by ID (-p/-f), or replace photo (-P with one file)
 
 Examples:
@@ -44,8 +44,8 @@ Examples:
   cairn -W prompt.txt -o result.txt
   cairn -d hello
   cairn --dict word
-  cairn -L "Taman Rimba Kiara"
-  cairn --place "Paris" "London"
+  cairn -F places.txt
+  cairn --places-file places.txt
   cairn -u 123 -p "Corrected message"
   cairn -u 456 -p "New caption"           # update photo caption
   cairn -u 456 -P new.jpg -p "New caption" # replace photo and caption
@@ -61,7 +61,7 @@ func main() {
 	writerPath := pflag.StringP("writer", "W", "", "Read setting from file, send to OpenRouter (streaming), get generated content")
 	outputPath := pflag.StringP("output", "o", "", "Write generated content to file (use with -W)")
 	dictWord := pflag.StringP("dict", "d", "", "Look up word meaning")
-	placeQuery := pflag.StringP("place", "L", "", "Geocode place name(s) via Google Maps")
+	placesFile := pflag.StringP("places-file", "F", "", "Read place names to geocode, one per line (- for stdin)")
 	updateMsgID := pflag.StringP("update", "u", "", "Message ID to update (use with -p or -f for new content)")
 	help := pflag.BoolP("help", "h", false, "Show help message")
 
@@ -126,19 +126,14 @@ func main() {
 		return
 	}
 
-	if pflag.Lookup("place").Changed {
-		var places []string
-		if strings.TrimSpace(*placeQuery) != "" {
-			places = append(places, strings.TrimSpace(*placeQuery))
-		}
-		for _, a := range pflag.Args() {
-			a = strings.TrimSpace(a)
-			if a != "" {
-				places = append(places, a)
-			}
+	if *placesFile != "" {
+		places, err := readPlacesFromFile(*placesFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
 		}
 		if len(places) == 0 {
-			fmt.Fprintln(os.Stderr, "Error: -L/--place requires at least one place (e.g. cairn -L \"Central Park\")")
+			fmt.Fprintln(os.Stderr, "Error: no place names in file (use one non-comment line per place; # starts a comment)")
 			os.Exit(1)
 		}
 		if err := GeocodePlaces(config, places); err != nil {
@@ -240,7 +235,7 @@ func main() {
 
 	if len(photos) == 0 {
 		if content == "" && file == "" {
-			fmt.Fprintln(os.Stderr, "Error: Either --post or --file must be provided (or use -P/--photo to post a photo, -m/--morning for sleep data, -W/--writer for OpenRouter, -L/--place to geocode, or -d/--dict)")
+			fmt.Fprintln(os.Stderr, "Error: Either --post or --file must be provided (or use -P/--photo to post a photo, -m/--morning for sleep data, -W/--writer for OpenRouter, -F/--places-file to geocode, or -d/--dict)")
 			printHelp()
 			os.Exit(1)
 		}
