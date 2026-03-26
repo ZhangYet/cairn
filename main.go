@@ -28,6 +28,9 @@ Flags:
   -W, --writer PATH   Read setting from file, send to OpenAI or OpenRouter (streaming), get generated content
   -o, --output PATH   Write generated content to file (use with -W)
   -d, --dict WORD     Look up word meaning (Free Dictionary API)
+  -F, --places-file PATH  Geocode places from file, one per line ([google] api_key); use - for stdin
+  -T, --travel        With -F: optimize visit order (great-circle km); first line = start
+      --travel-open   With -T: mode 2 — end at last stop; do not return to the first place (default: mode 1, round trip)
   -u, --update ID     Update message/caption by ID (-p/-f), or replace photo (-P with one file)
 
 Examples:
@@ -43,6 +46,10 @@ Examples:
   cairn -W prompt.txt -o result.txt
   cairn -d hello
   cairn --dict word
+  cairn -F places.txt
+  cairn -F places.txt -T
+  cairn -F places.txt -T --travel-open
+  cairn --places-file places.txt --travel
   cairn -u 123 -p "Corrected message"
   cairn -u 456 -p "New caption"           # update photo caption
   cairn -u 456 -P new.jpg -p "New caption" # replace photo and caption
@@ -58,6 +65,9 @@ func main() {
 	writerPath := pflag.StringP("writer", "W", "", "Read setting from file, send to OpenRouter (streaming), get generated content")
 	outputPath := pflag.StringP("output", "o", "", "Write generated content to file (use with -W)")
 	dictWord := pflag.StringP("dict", "d", "", "Look up word meaning")
+	placesFile := pflag.StringP("places-file", "F", "", "Read place names to geocode, one per line (- for stdin)")
+	travel := pflag.BoolP("travel", "T", false, "With -F: optimize route (great-circle); first line is start; add --travel-open for no return")
+	travelOpen := pflag.Bool("travel-open", false, "With -T: open path — do not return to first place")
 	updateMsgID := pflag.StringP("update", "u", "", "Message ID to update (use with -p or -f for new content)")
 	help := pflag.BoolP("help", "h", false, "Show help message")
 
@@ -76,6 +86,10 @@ func main() {
 	}
 
 	if *morning {
+		if err := requireTelegram(config); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 		var additionalText string
 		content, file := *postContent, *filePath
 		if file != "" {
@@ -118,7 +132,44 @@ func main() {
 		return
 	}
 
+	if *travel && *placesFile == "" {
+		fmt.Fprintln(os.Stderr, "Error: -T/--travel requires -F/--places-file")
+		os.Exit(1)
+	}
+	if *travelOpen && !*travel {
+		fmt.Fprintln(os.Stderr, "Error: --travel-open requires -T/--travel")
+		os.Exit(1)
+	}
+
+	if *placesFile != "" {
+		places, err := readPlacesFromFile(*placesFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if len(places) == 0 {
+			fmt.Fprintln(os.Stderr, "Error: no place names in file (use one non-comment line per place; # starts a comment)")
+			os.Exit(1)
+		}
+		if *travel {
+			if err := TravelPlacesRoute(config, places, !*travelOpen); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			if err := GeocodePlaces(config, places); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		}
+		return
+	}
+
 	if *updateMsgID != "" {
+		if err := requireTelegram(config); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 		msgID, err := strconv.ParseInt(*updateMsgID, 10, 64)
 		if err != nil || msgID <= 0 {
 			fmt.Fprintln(os.Stderr, "Error: -u/--update requires a positive integer message ID")
@@ -206,7 +257,7 @@ func main() {
 
 	if len(photos) == 0 {
 		if content == "" && file == "" {
-			fmt.Fprintln(os.Stderr, "Error: Either --post or --file must be provided (or use -P/--photo to post a photo, -m/--morning for sleep data, or -W/--writer for OpenRouter)")
+			fmt.Fprintln(os.Stderr, "Error: Either --post or --file must be provided (or use -P/--photo to post a photo, -m/--morning for sleep data, -W/--writer for OpenRouter, -F/--places-file to geocode or -T with -F for a round trip, or -d/--dict)")
 			printHelp()
 			os.Exit(1)
 		}
@@ -225,6 +276,11 @@ func main() {
 		}
 	} else {
 		finalContent = content
+	}
+
+	if err := requireTelegram(config); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 
 	if len(photos) > 0 {

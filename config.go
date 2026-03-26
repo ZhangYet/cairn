@@ -14,6 +14,12 @@ type Config struct {
 	Fitbit     FitbitConfig     `toml:"fitbit"`
 	OpenRouter OpenRouterConfig `toml:"openrouter"`
 	OpenAI     OpenAIConfig     `toml:"openai"`
+	Google     GoogleConfig     `toml:"google"`
+}
+
+// GoogleConfig is the [google] section (Maps Geocoding API key).
+type GoogleConfig struct {
+	APIKey string `toml:"api_key"`
 }
 
 // TelegramConfig is the [telegram] section.
@@ -61,7 +67,7 @@ func loadConfig(configPath string) (*Config, error) {
 	data, err := os.ReadFile(expandedPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("config file not found at %s\nPlease create a config file with the following structure:\n[telegram]\nbot_token = \"your_bot_token\"\nchannel_id = \"@your_channel\"\n\n[fitbit]\nclient_id = \"your_client_id\"\nclient_secret = \"your_client_secret\"\n\n[openrouter]\napi_key = \"your_openrouter_api_key\"\nmodel = \"openrouter/model-id\"\n\n[openai]\napi_key = \"your_openai_api_key\"\nmodel = \"gpt-4o-mini\"", expandedPath)
+			return nil, fmt.Errorf("config file not found at %s\nPlease create a config file with the following structure:\n[telegram]\nbot_token = \"your_bot_token\"\nchannel_id = \"@your_channel\"\n\n[fitbit]\nclient_id = \"your_client_id\"\nclient_secret = \"your_client_secret\"\n\n[openrouter]\napi_key = \"your_openrouter_api_key\"\nmodel = \"openrouter/model-id\"\n\n[openai]\napi_key = \"your_openai_api_key\"\nmodel = \"gpt-4o-mini\"\n\n[google]\napi_key = \"your_maps_geocoding_api_key\"", expandedPath)
 		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
@@ -71,14 +77,18 @@ func loadConfig(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse TOML config: %w", err)
 	}
 
+	return &config, nil
+}
+
+// requireTelegram returns an error if Telegram posting credentials are missing.
+func requireTelegram(config *Config) error {
 	if config.Telegram.BotToken == "" {
-		return nil, fmt.Errorf("'bot_token' not found in config file")
+		return fmt.Errorf("'bot_token' not found in config file")
 	}
 	if config.Telegram.ChannelID == "" {
-		return nil, fmt.Errorf("'channel_id' not found in config file")
+		return fmt.Errorf("'channel_id' not found in config file")
 	}
-
-	return &config, nil
+	return nil
 }
 
 func readFileContent(filePath string) (string, error) {
