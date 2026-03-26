@@ -28,6 +28,7 @@ Flags:
   -W, --writer PATH   Read setting from file, send to OpenAI or OpenRouter (streaming), get generated content
   -o, --output PATH   Write generated content to file (use with -W)
   -d, --dict WORD     Look up word meaning (Free Dictionary API)
+  -L, --place QUERY   Geocode place(s) via Google Maps ([google] api_key in config); extra args are more places
   -u, --update ID     Update message/caption by ID (-p/-f), or replace photo (-P with one file)
 
 Examples:
@@ -43,6 +44,8 @@ Examples:
   cairn -W prompt.txt -o result.txt
   cairn -d hello
   cairn --dict word
+  cairn -L "Taman Rimba Kiara"
+  cairn --place "Paris" "London"
   cairn -u 123 -p "Corrected message"
   cairn -u 456 -p "New caption"           # update photo caption
   cairn -u 456 -P new.jpg -p "New caption" # replace photo and caption
@@ -58,6 +61,7 @@ func main() {
 	writerPath := pflag.StringP("writer", "W", "", "Read setting from file, send to OpenRouter (streaming), get generated content")
 	outputPath := pflag.StringP("output", "o", "", "Write generated content to file (use with -W)")
 	dictWord := pflag.StringP("dict", "d", "", "Look up word meaning")
+	placeQuery := pflag.StringP("place", "L", "", "Geocode place name(s) via Google Maps")
 	updateMsgID := pflag.StringP("update", "u", "", "Message ID to update (use with -p or -f for new content)")
 	help := pflag.BoolP("help", "h", false, "Show help message")
 
@@ -76,6 +80,10 @@ func main() {
 	}
 
 	if *morning {
+		if err := requireTelegram(config); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 		var additionalText string
 		content, file := *postContent, *filePath
 		if file != "" {
@@ -118,7 +126,33 @@ func main() {
 		return
 	}
 
+	if pflag.Lookup("place").Changed {
+		var places []string
+		if strings.TrimSpace(*placeQuery) != "" {
+			places = append(places, strings.TrimSpace(*placeQuery))
+		}
+		for _, a := range pflag.Args() {
+			a = strings.TrimSpace(a)
+			if a != "" {
+				places = append(places, a)
+			}
+		}
+		if len(places) == 0 {
+			fmt.Fprintln(os.Stderr, "Error: -L/--place requires at least one place (e.g. cairn -L \"Central Park\")")
+			os.Exit(1)
+		}
+		if err := GeocodePlaces(config, places); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if *updateMsgID != "" {
+		if err := requireTelegram(config); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 		msgID, err := strconv.ParseInt(*updateMsgID, 10, 64)
 		if err != nil || msgID <= 0 {
 			fmt.Fprintln(os.Stderr, "Error: -u/--update requires a positive integer message ID")
@@ -206,7 +240,7 @@ func main() {
 
 	if len(photos) == 0 {
 		if content == "" && file == "" {
-			fmt.Fprintln(os.Stderr, "Error: Either --post or --file must be provided (or use -P/--photo to post a photo, -m/--morning for sleep data, or -W/--writer for OpenRouter)")
+			fmt.Fprintln(os.Stderr, "Error: Either --post or --file must be provided (or use -P/--photo to post a photo, -m/--morning for sleep data, -W/--writer for OpenRouter, -L/--place to geocode, or -d/--dict)")
 			printHelp()
 			os.Exit(1)
 		}
@@ -225,6 +259,11 @@ func main() {
 		}
 	} else {
 		finalContent = content
+	}
+
+	if err := requireTelegram(config); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 
 	if len(photos) > 0 {
