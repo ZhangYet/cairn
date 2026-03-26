@@ -8,11 +8,19 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"text/tabwriter"
 	"time"
+
+	"github.com/mattn/go-runewidth"
 )
 
 const googleGeocodeURL = "https://maps.googleapis.com/maps/api/geocode/json"
+
+// maxAddrDisplayCols caps the Address column (display width) so the table stays readable.
+const maxAddrDisplayCols = 58
+
+type geocodeRow struct {
+	place, address, lat, lng string
+}
 
 type geocodeResponse struct {
 	Status       string `json:"status"`
@@ -87,10 +95,7 @@ func GeocodePlaces(cfg *Config, queries []string) error {
 	if cfg.Google.APIKey == "" {
 		return fmt.Errorf("set [google] api_key in your config (Maps Platform Geocoding API)")
 	}
-	type row struct {
-		place, address, lat, lng string
-	}
-	var rows []row
+	var rows []geocodeRow
 	for _, q := range queries {
 		q = strings.TrimSpace(q)
 		if q == "" {
@@ -100,17 +105,58 @@ func GeocodePlaces(cfg *Config, queries []string) error {
 		if err != nil {
 			return err
 		}
-		rows = append(rows, row{place: q, address: addr, lat: lat, lng: lng})
+		rows = append(rows, geocodeRow{place: q, address: addr, lat: lat, lng: lng})
 	}
 	if len(rows) == 0 {
 		return fmt.Errorf("no place names to look up")
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "Place\tAddress\tLatitude\tLongitude")
-	fmt.Fprintln(w, "-----\t-------\t--------\t---------")
-	for _, r := range rows {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", r.place, r.address, r.lat, r.lng)
+	printGeocodeTable(os.Stdout, rows)
+	return nil
+}
+
+func geocodeCell(s string, width int) string {
+	if runewidth.StringWidth(s) > width {
+		s = runewidth.Truncate(s, width, "…")
 	}
-	return w.Flush()
+	return runewidth.FillRight(s, width)
+}
+
+func printGeocodeTable(out *os.File, rows []geocodeRow) {
+	wPlace := runewidth.StringWidth("Place")
+	wAddr := runewidth.StringWidth("Address")
+	for _, r := range rows {
+		if n := runewidth.StringWidth(r.place); n > wPlace {
+			wPlace = n
+		}
+		if n := runewidth.StringWidth(r.address); n > wAddr {
+			wAddr = n
+		}
+	}
+	if wAddr > maxAddrDisplayCols {
+		wAddr = maxAddrDisplayCols
+	}
+	wLat := runewidth.StringWidth("Latitude")
+	wLng := runewidth.StringWidth("Longitude")
+	for _, r := range rows {
+		if n := runewidth.StringWidth(r.lat); n > wLat {
+			wLat = n
+		}
+		if n := runewidth.StringWidth(r.lng); n > wLng {
+			wLng = n
+		}
+	}
+
+	sep := strings.Repeat("-", wPlace) + " | " + strings.Repeat("-", wAddr) + " | " + strings.Repeat("-", wLat) + " | " + strings.Repeat("-", wLng)
+
+	line := func(a, b, c, d string) {
+		fmt.Fprintf(out, "%s | %s | %s | %s\n",
+			geocodeCell(a, wPlace), geocodeCell(b, wAddr), geocodeCell(c, wLat), geocodeCell(d, wLng))
+	}
+
+	line("Place", "Address", "Latitude", "Longitude")
+	fmt.Fprintln(out, sep)
+	for _, r := range rows {
+		line(r.place, r.address, r.lat, r.lng)
+	}
 }
