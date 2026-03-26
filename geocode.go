@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -87,6 +88,26 @@ func geocodeOne(apiKey, query string) (address, lat, lng string, err error) {
 	default:
 		return "", "", "", fmt.Errorf("google geocoding: %s", out.Status)
 	}
+}
+
+// geocodeOneLatLng geocodes query and returns coordinates; fails if there is no result.
+func geocodeOneLatLng(apiKey, query string) (address string, lat, lng float64, err error) {
+	addr, latStr, lngStr, err := geocodeOne(apiKey, query)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	if latStr == "" || lngStr == "" {
+		return addr, 0, 0, fmt.Errorf("no geocoding result for %q", query)
+	}
+	lat, err = strconv.ParseFloat(latStr, 64)
+	if err != nil {
+		return "", 0, 0, fmt.Errorf("parse latitude for %q: %w", query, err)
+	}
+	lng, err = strconv.ParseFloat(lngStr, 64)
+	if err != nil {
+		return "", 0, 0, fmt.Errorf("parse longitude for %q: %w", query, err)
+	}
+	return addr, lat, lng, nil
 }
 
 // readPlacesFromFile returns non-empty lines as place names. Blank lines and lines whose
