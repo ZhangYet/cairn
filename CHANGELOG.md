@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.2.2] - 2026-03-26
+
+### Added
+
+- **Release automation** — `release.sh` at repo root: summarizes commits since the last tag into `ChangeLog.md`, commits that update, creates an annotated tag, and pushes the branch and tag to `origin`.
+- **Cursor skill** — `.cursor/skills/add-release-tag/SKILL.md` documents the release flow for agents (copy-paste `./release.sh <tag>` usage).
+
+---
+
 ## [0.2.1] - 2025-02-04
 
 ### Added
@@ -40,6 +49,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 Baseline: Telegram posting, Fitbit morning summary, OpenRouter/OpenAI writer, photo posting and message updates. Single-file `main.go` with embedded config and helpers.
 
+[0.2.2]: https://github.com/ZhangYet/cairn/compare/0.2.1...0.2.2
 [0.2.1]: https://github.com/ZhangYet/cairn/compare/0.2.0...0.2.1
 [0.2.0]: https://github.com/ZhangYet/cairn/compare/0.1.3...0.2.0
 [0.1.3]: https://github.com/ZhangYet/cairn/releases/tag/0.1.3
