@@ -419,9 +419,7 @@ func formatSleepData(sleepResp *FitbitSleepResponse) string {
 		b.WriteString(fmt.Sprintf("<b>Minutes Asleep:</b> %d\n", sleep.MinutesAsleep))
 		b.WriteString(fmt.Sprintf("<b>Minutes Awake:</b> %d\n", sleep.MinutesAwake))
 		b.WriteString(fmt.Sprintf("<b>Efficiency:</b> %d%%\n", sleep.Efficiency))
-		if sleep.MinutesToFallAsleep > 0 {
-			b.WriteString(fmt.Sprintf("<b>Time to Fall Asleep:</b> %d min\n", sleep.MinutesToFallAsleep))
-		}
+		b.WriteString(fmt.Sprintf("<b>Time to Fall Asleep:</b> %d min\n", sleep.MinutesToFallAsleep))
 		if sleep.Levels.Summary.Deep.Minutes > 0 || sleep.Levels.Summary.Light.Minutes > 0 || sleep.Levels.Summary.Rem.Minutes > 0 {
 			b.WriteString("\n<b>Sleep Stages:</b>\n")
 			b.WriteString(fmt.Sprintf("  Deep: %d min\n", sleep.Levels.Summary.Deep.Minutes))
@@ -436,13 +434,14 @@ func formatSleepData(sleepResp *FitbitSleepResponse) string {
 	return b.String()
 }
 
-// Morning runs the morning flow: get Fitbit sleep data and post to Telegram.
-func Morning(config *Config, additionalText string) error {
+// getFitbitAccessToken obtains a valid Fitbit access token, triggering interactive
+// authorization if no tokens are stored yet.
+func getFitbitAccessToken(config *Config) (string, error) {
 	if config.Fitbit.ClientID == "" {
-		return fmt.Errorf("'fitbit.client_id' not found in config file")
+		return "", fmt.Errorf("'fitbit.client_id' not found in config file")
 	}
 	if config.Fitbit.ClientSecret == "" {
-		return fmt.Errorf("'fitbit.client_secret' not found in config file")
+		return "", fmt.Errorf("'fitbit.client_secret' not found in config file")
 	}
 	var afterRefresh func()
 	if config.Fitbit.ScpHost != "" {
@@ -460,15 +459,49 @@ func Morning(config *Config, additionalText string) error {
 			callbackURL := "http://127.0.0.1:8765/callback"
 			fmt.Fprintln(os.Stderr, "No Fitbit tokens found. Starting authorization...")
 			if err := authorizeFitbit(config.Fitbit.ClientID, config.Fitbit.ClientSecret, callbackURL, afterRefresh); err != nil {
-				return fmt.Errorf("authorization failed: %w", err)
+				return "", fmt.Errorf("authorization failed: %w", err)
 			}
 			accessToken, err = getValidFitbitToken(config.Fitbit.ClientID, config.Fitbit.ClientSecret, afterRefresh)
 			if err != nil {
-				return fmt.Errorf("failed to get token after authorization: %w", err)
+				return "", fmt.Errorf("failed to get token after authorization: %w", err)
 			}
 		} else {
-			return err
+			return "", err
 		}
+	}
+	return accessToken, nil
+}
+
+// DumpSleepJSON fetches today's raw sleep API response and writes it to outPath.
+// It does NOT post to Telegram; useful for inspecting the actual API payload.
+func DumpSleepJSON(config *Config, outPath string) error {
+	accessToken, err := getFitbitAccessToken(config)
+	if err != nil {
+		return err
+	}
+	today := time.Now().Format("2006-01-02")
+	sleepURL := fmt.Sprintf("https://api.fitbit.com/1/user/-/sleep/date/%s.json", today)
+	resp, err := fitbitHTTPGet(sleepURL, accessToken)
+	if err != nil {
+		return fmt.Errorf("failed to fetch sleep data: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read sleep response: %w", err)
+	}
+	if err := os.WriteFile(outPath, body, 0644); err != nil {
+		return fmt.Errorf("failed to write %s: %w", outPath, err)
+	}
+	fmt.Fprintf(os.Stderr, "Sleep JSON written to %s (%d bytes)\n", outPath, len(body))
+	return nil
+}
+
+// Morning runs the morning flow: get Fitbit sleep data and post to Telegram.
+func Morning(config *Config, additionalText string) error {
+	accessToken, err := getFitbitAccessToken(config)
+	if err != nil {
+		return err
 	}
 	today := time.Now().Format("2006-01-02")
 	sleepResp, err := getSleepData(accessToken, today)
