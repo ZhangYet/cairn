@@ -117,7 +117,13 @@ func loadFitbitTokens() (*FitbitTokens, error) {
 	return &tokens, nil
 }
 
-func saveFitbitTokens(tokens *FitbitTokens) error {
+func saveFitbitTokens(tokens *FitbitTokens, afterSaveToken func()) error {
+	defer func() {
+		fmt.Fprintln(os.Stdout, "[Fitbit] Token was saved to the token file, sync with the remote end.")
+		afterSaveToken()
+		fmt.Fprintf(os.Stdout, "[Fitbit] Token synced with the remote end.")
+	}()
+
 	tokenPath, err := getTokenFilePath()
 	if err != nil {
 		return err
@@ -200,18 +206,12 @@ func getValidFitbitToken(clientID, clientSecret string, afterRefresh func()) (st
 			return "", fmt.Errorf("failed to refresh token: %w", err)
 		}
 		fmt.Fprintln(os.Stderr, "[Fitbit] Token refreshed, saving to local file...")
-		if err := saveFitbitTokens(newTokens); err != nil {
+		if err := saveFitbitTokens(newTokens, afterRefresh); err != nil {
 			return "", fmt.Errorf("failed to save refreshed token: %w", err)
-		}
-		if afterRefresh != nil {
-			fmt.Fprintln(os.Stderr, "[Fitbit] Running post-refresh hook (e.g. scp to remote)...")
-			afterRefresh()
-		} else {
-			fmt.Fprintln(os.Stderr, "[Fitbit] No post-refresh hook configured (fitbit.scp_host not set).")
 		}
 		return newTokens.AccessToken, nil
 	}
-	fmt.Fprintln(os.Stderr, "[Fitbit] Token still valid, using cached token (no refresh, no scp).")
+
 	return tokens.AccessToken, nil
 }
 
@@ -241,7 +241,7 @@ func scpFitbitTokensToRemote(host, remotePath string) error {
 	return nil
 }
 
-func authorizeFitbit(clientID, clientSecret, callbackURL string) error {
+func authorizeFitbit(clientID, clientSecret, callbackURL string, afterSaveToken func()) error {
 	codeVerifier, err := generateCodeVerifier()
 	if err != nil {
 		return err
@@ -324,7 +324,7 @@ func authorizeFitbit(clientID, clientSecret, callbackURL string) error {
 			RefreshToken: tokenResp.RefreshToken,
 			ExpiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
 		}
-		if err := saveFitbitTokens(tokens); err != nil {
+		if err := saveFitbitTokens(tokens, afterSaveToken); err != nil {
 			return err
 		}
 		fmt.Fprintln(os.Stderr, "Successfully authorized and saved tokens!")
@@ -459,7 +459,7 @@ func Morning(config *Config, additionalText string) error {
 		if strings.Contains(err.Error(), "no Fitbit tokens found") {
 			callbackURL := "http://127.0.0.1:8765/callback"
 			fmt.Fprintln(os.Stderr, "No Fitbit tokens found. Starting authorization...")
-			if err := authorizeFitbit(config.Fitbit.ClientID, config.Fitbit.ClientSecret, callbackURL); err != nil {
+			if err := authorizeFitbit(config.Fitbit.ClientID, config.Fitbit.ClientSecret, callbackURL, afterRefresh); err != nil {
 				return fmt.Errorf("authorization failed: %w", err)
 			}
 			accessToken, err = getValidFitbitToken(config.Fitbit.ClientID, config.Fitbit.ClientSecret, afterRefresh)
