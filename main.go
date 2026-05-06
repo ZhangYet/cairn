@@ -62,6 +62,7 @@ func main() {
 	filePath := pflag.StringP("file", "f", "", "Read content from a file")
 	photoPathStr := pflag.StringP("photo", "P", "", "Path to photo file(s) to post (comma-separated)")
 	morning := pflag.BoolP("morning", "m", false, "Get Fitbit sleep data and post to Telegram channel")
+	dumpSleep := pflag.String("dump-sleep", "", "With -m: dump raw Fitbit sleep JSON to PATH and exit (do not post)")
 	writerPath := pflag.StringP("writer", "W", "", "Read setting from file, send to OpenRouter (streaming), get generated content")
 	outputPath := pflag.StringP("output", "o", "", "Write generated content to file (use with -W)")
 	dictWord := pflag.StringP("dict", "d", "", "Look up word meaning")
@@ -86,6 +87,13 @@ func main() {
 	}
 
 	if *morning {
+		if *dumpSleep != "" {
+			if err := DumpSleepJSON(config, *dumpSleep); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
 		if err := requireTelegram(config); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
