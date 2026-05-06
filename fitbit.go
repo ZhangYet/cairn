@@ -32,21 +32,29 @@ type FitbitSleepResponse struct {
 
 // FitbitSleepLog is one sleep log entry.
 type FitbitSleepLog struct {
-	DateOfSleep         string            `json:"dateOfSleep"`
-	Duration            int               `json:"duration"`
-	Efficiency          int               `json:"efficiency"`
-	EndTime             string            `json:"endTime"`
-	InfoCode            int               `json:"infoCode"`
-	IsMainSleep         bool              `json:"isMainSleep"`
-	Levels              FitbitSleepLevels `json:"levels"`
-	LogID               int64             `json:"logId"`
-	MinutesAsleep       int               `json:"minutesAsleep"`
-	MinutesAwake        int               `json:"minutesAwake"`
-	MinutesToFallAsleep int               `json:"minutesToFallAsleep"`
-	StartTime           string            `json:"startTime"`
-	TimeInBed           int               `json:"timeInBed"`
-	Type                string            `json:"type"`
-	ValueOfSleepScore   *int              `json:"valueOfSleepScore,omitempty"`
+	DateOfSleep         string                   `json:"dateOfSleep"`
+	Duration            int                      `json:"duration"`
+	Efficiency          int                      `json:"efficiency"`
+	EndTime             string                   `json:"endTime"`
+	InfoCode            int                      `json:"infoCode"`
+	IsMainSleep         bool                     `json:"isMainSleep"`
+	Levels              FitbitSleepLevels        `json:"levels"`
+	MinuteData          []FitbitSleepMinuteEntry `json:"minuteData"`
+	LogID               int64                    `json:"logId"`
+	MinutesAsleep       int                      `json:"minutesAsleep"`
+	MinutesAwake        int                      `json:"minutesAwake"`
+	MinutesToFallAsleep int                      `json:"minutesToFallAsleep"`
+	StartTime           string                   `json:"startTime"`
+	TimeInBed           int                      `json:"timeInBed"`
+	Type                string                   `json:"type"`
+	ValueOfSleepScore   *int                     `json:"valueOfSleepScore,omitempty"`
+}
+
+// FitbitSleepMinuteEntry is one classic-format per-minute entry: value is "1"=asleep,
+// "2"=restless, "3"=awake; dateTime is HH:MM:SS without date.
+type FitbitSleepMinuteEntry struct {
+	DateTime string `json:"dateTime"`
+	Value    string `json:"value"`
 }
 
 // FitbitSleepLevels contains sleep stage data.
@@ -399,6 +407,41 @@ func getSleepData(accessToken string, date string) (*FitbitSleepResponse, error)
 	return &sleepResp, nil
 }
 
+// computeTimeToFallAsleep returns the minutes between sleep.StartTime and the first
+// non-awake segment. Fitbit's minutesToFallAsleep field is deprecated (always 0),
+// so we derive it from levels.data (stages format) or minuteData (classic format).
+func computeTimeToFallAsleep(sleep *FitbitSleepLog) int {
+	const layout = "2006-01-02T15:04:05.000"
+	start, err := time.Parse(layout, sleep.StartTime)
+	if err != nil {
+		return 0
+	}
+	// Stages format: levels.data has segments with named levels.
+	for _, seg := range sleep.Levels.Data {
+		lvl := strings.ToLower(seg.Level)
+		if lvl == "wake" || lvl == "awake" {
+			continue
+		}
+		t, err := time.Parse(layout, seg.DateTime)
+		if err != nil {
+			return 0
+		}
+		diff := int(t.Sub(start).Minutes())
+		if diff < 0 {
+			return 0
+		}
+		return diff
+	}
+	// Classic format: minuteData is a per-minute series; "1"=asleep, "2"=restless, "3"=awake.
+	// Use first "1" (truly asleep) so transient restlessness at bedtime doesn't yield 0.
+	for i, m := range sleep.MinuteData {
+		if m.Value == "1" {
+			return i
+		}
+	}
+	return 0
+}
+
 func formatSleepData(sleepResp *FitbitSleepResponse) string {
 	if len(sleepResp.Sleep) == 0 {
 		return "No sleep data found for today."
@@ -419,7 +462,7 @@ func formatSleepData(sleepResp *FitbitSleepResponse) string {
 		b.WriteString(fmt.Sprintf("<b>Minutes Asleep:</b> %d\n", sleep.MinutesAsleep))
 		b.WriteString(fmt.Sprintf("<b>Minutes Awake:</b> %d\n", sleep.MinutesAwake))
 		b.WriteString(fmt.Sprintf("<b>Efficiency:</b> %d%%\n", sleep.Efficiency))
-		b.WriteString(fmt.Sprintf("<b>Time to Fall Asleep:</b> %d min\n", sleep.MinutesToFallAsleep))
+		b.WriteString(fmt.Sprintf("<b>Time to Fall Asleep:</b> %d min\n", computeTimeToFallAsleep(&sleep)))
 		if sleep.Levels.Summary.Deep.Minutes > 0 || sleep.Levels.Summary.Light.Minutes > 0 || sleep.Levels.Summary.Rem.Minutes > 0 {
 			b.WriteString("\n<b>Sleep Stages:</b>\n")
 			b.WriteString(fmt.Sprintf("  Deep: %d min\n", sleep.Levels.Summary.Deep.Minutes))
