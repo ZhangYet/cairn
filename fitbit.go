@@ -193,8 +193,10 @@ func refreshFitbitToken(clientID, clientSecret, refreshToken string) (*FitbitTok
 	}, nil
 }
 
-// getValidFitbitToken returns a valid access token, refreshing if needed. If the token was refreshed,
-// afterRefresh is called (e.g. to scp the token file to a remote server).
+// getValidFitbitToken returns an access token. On non-Linux platforms it will refresh
+// expired tokens automatically; on Linux (headless) it reads the token as-is without
+// refreshing, since the browser-based re-authorization flow is unavailable.
+// If the token was refreshed and saved, afterRefresh is called.
 func getValidFitbitToken(clientID, clientSecret string, afterRefresh func()) (string, error) {
 	tokens, err := loadFitbitTokens()
 	if err != nil {
@@ -203,6 +205,12 @@ func getValidFitbitToken(clientID, clientSecret string, afterRefresh func()) (st
 	if tokens == nil {
 		return "", fmt.Errorf("no Fitbit tokens found. Please run authorization first")
 	}
+
+	if runtime.GOOS == "linux" {
+		fmt.Fprintln(os.Stderr, "[Fitbit] Linux detected: using stored token without refresh.")
+		return tokens.AccessToken, nil
+	}
+
 	if time.Now().Add(5 * time.Minute).After(tokens.ExpiresAt) {
 		fmt.Fprintln(os.Stderr, "[Fitbit] Token expired or expiring soon, refreshing...")
 		newTokens, err := refreshFitbitToken(clientID, clientSecret, tokens.RefreshToken)
@@ -499,6 +507,9 @@ func getFitbitAccessToken(config *Config) (string, error) {
 	accessToken, err := getValidFitbitToken(config.Fitbit.ClientID, config.Fitbit.ClientSecret, afterRefresh)
 	if err != nil {
 		if strings.Contains(err.Error(), "no Fitbit tokens found") {
+			if runtime.GOOS == "linux" {
+				return "", fmt.Errorf("no Fitbit tokens found. Copy ~/.cairn_fitbit_tokens.json to this machine, or run authorization on a desktop")
+			}
 			callbackURL := "http://127.0.0.1:8765/callback"
 			fmt.Fprintln(os.Stderr, "No Fitbit tokens found. Starting authorization...")
 			if err := authorizeFitbit(config.Fitbit.ClientID, config.Fitbit.ClientSecret, callbackURL, afterRefresh); err != nil {
