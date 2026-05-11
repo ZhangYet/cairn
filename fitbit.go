@@ -127,9 +127,12 @@ func loadFitbitTokens() (*FitbitTokens, error) {
 
 func saveFitbitTokens(tokens *FitbitTokens, afterSaveToken func()) error {
 	defer func() {
-		fmt.Fprintln(os.Stdout, "[Fitbit] Token was saved to the token file, sync with the remote end.")
-		afterSaveToken()
-		fmt.Fprintf(os.Stdout, "[Fitbit] Token synced with the remote end.")
+		fmt.Fprintln(os.Stdout, "[Fitbit] Token was saved to the token file.")
+		if afterSaveToken != nil {
+			fmt.Fprintln(os.Stdout, "[Fitbit] Syncing token to remote end.")
+			afterSaveToken()
+			fmt.Fprintf(os.Stdout, "[Fitbit] Token synced with the remote end.")
+		}
 	}()
 
 	tokenPath, err := getTokenFilePath()
@@ -193,10 +196,8 @@ func refreshFitbitToken(clientID, clientSecret, refreshToken string) (*FitbitTok
 	}, nil
 }
 
-// getValidFitbitToken returns an access token. On non-Linux platforms it will refresh
-// expired tokens automatically; on Linux (headless) it reads the token as-is without
-// refreshing, since the browser-based re-authorization flow is unavailable.
-// If the token was refreshed and saved, afterRefresh is called.
+// getValidFitbitToken returns an access token, refreshing if needed. If the token was
+// refreshed and saved, afterRefresh is called.
 func getValidFitbitToken(clientID, clientSecret string, afterRefresh func()) (string, error) {
 	tokens, err := loadFitbitTokens()
 	if err != nil {
@@ -204,11 +205,6 @@ func getValidFitbitToken(clientID, clientSecret string, afterRefresh func()) (st
 	}
 	if tokens == nil {
 		return "", fmt.Errorf("no Fitbit tokens found. Please run authorization first")
-	}
-
-	if runtime.GOOS == "linux" {
-		fmt.Fprintln(os.Stderr, "[Fitbit] Linux detected: using stored token without refresh.")
-		return tokens.AccessToken, nil
 	}
 
 	if time.Now().Add(5 * time.Minute).After(tokens.ExpiresAt) {
@@ -373,6 +369,7 @@ func fitbitHTTPGet(urlStr, accessToken string) (*http.Response, error) {
 		return nil, err
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -566,8 +563,10 @@ func Morning(config *Config, additionalText string) error {
 	if additionalText != "" {
 		sleepMessage = sleepMessage + "\n\n" + strings.TrimSpace(additionalText)
 	}
+
 	if _, err := postToTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, sleepMessage); err != nil {
 		return fmt.Errorf("failed to post to Telegram: %w", err)
 	}
+
 	return nil
 }
