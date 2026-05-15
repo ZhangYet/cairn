@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.2.3] - 2026-05-15
+
+### Added
+
+- **Geocoding** (`--place`) — Geocode locations via Google Maps API; new `[google]` config section for `api_key`.
+- **Batch geocoding** (`--places-file`) — Read place names from a file (one per line, skip `#` comments and blanks).
+- **Travel optimization** (`--travel`, `--travel-open`) — TSP-based route optimization for geocoded places; supports fixed start/end or open-ended routes.
+- **Sleep dump** (`--dump-sleep`) — Export raw Fitbit sleep API JSON for debugging.
+- **Time to Fall Asleep** — Now always shown in sleep summary, computed from sleep stage data.
+- **Linux headless support** — Skip browser-based Fitbit OAuth on Linux; token refresh (API call) still works.
+
+### Changed
+
+- **Geocoding output** — Custom table layout with `runewidth` for CJK-aware alignment.
+
+### Fixed
+
+- Fitbit token refresh no longer blocked on Linux — only browser OAuth is skipped.
+- Nil pointer dereference in `saveFitbitTokens` when `scp_host` is not configured.
+- Time to Fall Asleep derived from stage data instead of deprecated Fitbit API field.
+
 ## [0.2.2] - 2026-03-26
 
 ### Added
@@ -49,6 +70,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 Baseline: Telegram posting, Fitbit morning summary, OpenRouter/OpenAI writer, photo posting and message updates. Single-file `main.go` with embedded config and helpers.
 
+[0.2.3]: https://github.com/ZhangYet/cairn/compare/0.2.2...0.2.3
 [0.2.2]: https://github.com/ZhangYet/cairn/compare/0.2.1...0.2.2
 [0.2.1]: https://github.com/ZhangYet/cairn/compare/0.2.0...0.2.1
 [0.2.0]: https://github.com/ZhangYet/cairn/compare/0.1.3...0.2.0
