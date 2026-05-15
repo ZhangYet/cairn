@@ -127,9 +127,12 @@ func loadFitbitTokens() (*FitbitTokens, error) {
 
 func saveFitbitTokens(tokens *FitbitTokens, afterSaveToken func()) error {
 	defer func() {
-		fmt.Fprintln(os.Stdout, "[Fitbit] Token was saved to the token file, sync with the remote end.")
-		afterSaveToken()
-		fmt.Fprintf(os.Stdout, "[Fitbit] Token synced with the remote end.")
+		fmt.Fprintln(os.Stdout, "[Fitbit] Token was saved to the token file.")
+		if afterSaveToken != nil {
+			fmt.Fprintln(os.Stdout, "[Fitbit] Syncing token to remote end.")
+			afterSaveToken()
+			fmt.Fprintf(os.Stdout, "[Fitbit] Token synced with the remote end.")
+		}
 	}()
 
 	tokenPath, err := getTokenFilePath()
@@ -193,8 +196,8 @@ func refreshFitbitToken(clientID, clientSecret, refreshToken string) (*FitbitTok
 	}, nil
 }
 
-// getValidFitbitToken returns a valid access token, refreshing if needed. If the token was refreshed,
-// afterRefresh is called (e.g. to scp the token file to a remote server).
+// getValidFitbitToken returns an access token, refreshing if needed. If the token was
+// refreshed and saved, afterRefresh is called.
 func getValidFitbitToken(clientID, clientSecret string, afterRefresh func()) (string, error) {
 	tokens, err := loadFitbitTokens()
 	if err != nil {
@@ -203,6 +206,7 @@ func getValidFitbitToken(clientID, clientSecret string, afterRefresh func()) (st
 	if tokens == nil {
 		return "", fmt.Errorf("no Fitbit tokens found. Please run authorization first")
 	}
+
 	if time.Now().Add(5 * time.Minute).After(tokens.ExpiresAt) {
 		fmt.Fprintln(os.Stderr, "[Fitbit] Token expired or expiring soon, refreshing...")
 		newTokens, err := refreshFitbitToken(clientID, clientSecret, tokens.RefreshToken)
@@ -365,6 +369,7 @@ func fitbitHTTPGet(urlStr, accessToken string) (*http.Response, error) {
 		return nil, err
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -499,6 +504,9 @@ func getFitbitAccessToken(config *Config) (string, error) {
 	accessToken, err := getValidFitbitToken(config.Fitbit.ClientID, config.Fitbit.ClientSecret, afterRefresh)
 	if err != nil {
 		if strings.Contains(err.Error(), "no Fitbit tokens found") {
+			if runtime.GOOS == "linux" {
+				return "", fmt.Errorf("no Fitbit tokens found. Copy ~/.cairn_fitbit_tokens.json to this machine, or run authorization on a desktop")
+			}
 			callbackURL := "http://127.0.0.1:8765/callback"
 			fmt.Fprintln(os.Stderr, "No Fitbit tokens found. Starting authorization...")
 			if err := authorizeFitbit(config.Fitbit.ClientID, config.Fitbit.ClientSecret, callbackURL, afterRefresh); err != nil {
@@ -555,8 +563,10 @@ func Morning(config *Config, additionalText string) error {
 	if additionalText != "" {
 		sleepMessage = sleepMessage + "\n\n" + strings.TrimSpace(additionalText)
 	}
+
 	if _, err := postToTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, sleepMessage); err != nil {
 		return fmt.Errorf("failed to post to Telegram: %w", err)
 	}
+
 	return nil
 }
