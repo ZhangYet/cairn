@@ -637,7 +637,12 @@ func downloadBird(name, audioDir, xcKey string) error {
 		return err
 	}
 
+	downloaded := 0
 	for _, rec := range recordings {
+		if rec.File == "" {
+			fmt.Fprintf(os.Stderr, "  Skipping XC%s: audio not downloadable (restricted species)\n", rec.ID)
+			continue
+		}
 		ext := filepath.Ext(rec.FileName)
 		if ext == "" {
 			ext = ".mp3"
@@ -663,13 +668,18 @@ func downloadBird(name, audioDir, xcKey string) error {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  Warning: failed to save audio record: %v\n", err)
 		}
+		downloaded++
 	}
 
 	if err := tx.Commit(); err != nil {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "Downloaded %s (%s) with %d recordings.\n", comName, sciName, len(recordings))
+	if downloaded == 0 {
+		fmt.Fprintf(os.Stderr, "Warning: no audio downloaded for %s (%s). Bird metadata saved for listing, but quiz requires audio.\n", comName, sciName)
+	} else {
+		fmt.Fprintf(os.Stderr, "Downloaded %s (%s) with %d recording(s).\n", comName, sciName, downloaded)
+	}
 	return nil
 }
 
