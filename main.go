@@ -31,7 +31,12 @@ Flags:
   -F, --places-file PATH  Geocode places from file, one per line ([google] api_key); use - for stdin
   -T, --travel        With -F: optimize visit order (great-circle km); first line = start
       --travel-open   With -T: mode 2 — end at last stop; do not return to the first place (default: mode 1, round trip)
-  -u, --update ID     Update message/caption by ID (-p/-f), or replace photo (-P with one file)
+  -B, --bird-download NAME  Download a bird species (Chinese/English/scientific name)
+  -L, --bird-list           List downloaded bird species
+  -A, --bird-play NAME      Play audio recordings for a downloaded bird species
+  -Q, --bird-quiz            Start bird sound quiz (default 4 choices), e.g. cairn -Q 3
+      --bird-audio-dir DIR  Audio storage directory (default ~/.cairn_bird_audio/)
+  -u, --update ID           Update message/caption by ID (-p/-f), or replace photo (-P with one file)
 
 Examples:
   cairn -p "Hello world #tag1 #tag2"
@@ -53,6 +58,14 @@ Examples:
   cairn -u 123 -p "Corrected message"
   cairn -u 456 -p "New caption"           # update photo caption
   cairn -u 456 -P new.jpg -p "New caption" # replace photo and caption
+  cairn -B "仓鸮"
+  cairn --bird-download "Barn Owl"
+  cairn --bird-download "Tyto alba"
+  cairn -L
+  cairn -A "仓鸮"
+  cairn --bird-play "Barn Owl"
+  cairn -Q
+  cairn -Q 3
 `, version)
 }
 
@@ -70,6 +83,11 @@ func main() {
 	travel := pflag.BoolP("travel", "T", false, "With -F: optimize route (great-circle); first line is start; add --travel-open for no return")
 	travelOpen := pflag.Bool("travel-open", false, "With -T: open path — do not return to first place")
 	updateMsgID := pflag.StringP("update", "u", "", "Message ID to update (use with -p or -f for new content)")
+	birdDownload := pflag.StringP("bird-download", "B", "", "Download bird data by name (Chinese/English/scientific)")
+	birdList := pflag.BoolP("bird-list", "L", false, "List downloaded bird species")
+	birdPlay := pflag.StringP("bird-play", "A", "", "Play audio recordings for a downloaded bird")
+	birdQuiz := pflag.BoolP("bird-quiz", "Q", false, "Start a bird sound quiz (default 4 choices)")
+	birdAudioDir := pflag.String("bird-audio-dir", "", "Directory to store bird audio files (default ~/.cairn_bird_audio/)")
 	help := pflag.BoolP("help", "h", false, "Show help message")
 
 	pflag.Parse()
@@ -134,6 +152,15 @@ func main() {
 			os.Exit(1)
 		}
 		if err := Dict(word); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if pflag.Lookup("bird-download").Changed || pflag.Lookup("bird-list").Changed || pflag.Lookup("bird-quiz").Changed || pflag.Lookup("bird-play").Changed {
+		audioDir := *birdAudioDir
+		if err := handleBirdCommand(*birdDownload, *birdList, *birdPlay, *birdQuiz, audioDir, config.Ebird.XCAPIKey); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -265,7 +292,7 @@ func main() {
 
 	if len(photos) == 0 {
 		if content == "" && file == "" {
-			fmt.Fprintln(os.Stderr, "Error: Either --post or --file must be provided (or use -P/--photo to post a photo, -m/--morning for sleep data, -W/--writer for OpenRouter, -F/--places-file to geocode or -T with -F for a round trip, or -d/--dict)")
+			fmt.Fprintln(os.Stderr, "Error: Either --post or --file must be provided (or use -P/--photo to post a photo, -m/--morning for sleep data, -W/--writer for OpenRouter, -F/--places-file to geocode or -T with -F for a round trip, -d/--dict for dictionary lookup, or -B/-L/-A/-Q for bird quiz)")
 			printHelp()
 			os.Exit(1)
 		}
