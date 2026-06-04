@@ -17,7 +17,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spf13/pflag"
 	_ "modernc.org/sqlite"
 )
 
@@ -575,7 +574,7 @@ func downloadAudioFile(urlStr, destPath, xcKey string) error {
 
 // ----- Download -----
 
-func downloadBird(name, audioDir, xcKey string) error {
+func BirdDownload(name, audioDir, xcKey string) error {
 	speciesCode, sciName, comName, chnName, err := resolveBirdName(name)
 	if err != nil {
 		return err
@@ -685,7 +684,7 @@ func downloadBird(name, audioDir, xcKey string) error {
 
 // ----- List -----
 
-func listBirds() error {
+func BirdList() error {
 	db, err := initBirdDB()
 	if err != nil {
 		return err
@@ -721,7 +720,7 @@ func listBirds() error {
 
 // ----- Quiz -----
 
-func runQuiz(numChoices int, audioDir string) error {
+func BirdQuiz(numChoices int, audioDir string) error {
 	if numChoices <= 0 {
 		numChoices = 4
 	}
@@ -868,7 +867,7 @@ func runQuiz(numChoices int, audioDir string) error {
 
 // ----- Play -----
 
-func playBird(name string) error {
+func BirdPlay(name string) error {
 	db, err := initBirdDB()
 	if err != nil {
 		return err
@@ -1054,30 +1053,6 @@ func playAudio(path string) *exec.Cmd {
 		return nil
 	}
 	return cmd
-}
-
-// ----- Command dispatcher -----
-
-func handleBirdCommand(downloadName string, list bool, playName string, quiz bool, audioDir string, xcKey string) error {
-	if downloadName != "" {
-		return downloadBird(downloadName, audioDir, xcKey)
-	}
-	if list {
-		return listBirds()
-	}
-	if playName != "" {
-		return playBird(playName)
-	}
-	if quiz {
-		n := 4
-		if pflag.NArg() > 0 {
-			if v, err := strconv.Atoi(pflag.Arg(0)); err == nil && v >= 2 {
-				n = v
-			}
-		}
-		return runQuiz(n, audioDir)
-	}
-	return fmt.Errorf("no bird command specified")
 }
 
 func httpGet(urlStr string) (*http.Response, error) {
