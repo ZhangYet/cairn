@@ -15,11 +15,18 @@ type Config struct {
 	OpenRouter OpenRouterConfig `toml:"openrouter"`
 	OpenAI     OpenAIConfig     `toml:"openai"`
 	Google     GoogleConfig     `toml:"google"`
+	Ebird      EbirdConfig      `toml:"ebird"`
 }
 
 // GoogleConfig is the [google] section (Maps Geocoding API key).
 type GoogleConfig struct {
 	APIKey string `toml:"api_key"`
+}
+
+// EbirdConfig is the [ebird] section.
+type EbirdConfig struct {
+	APIKey    string `toml:"api_key"`
+	XCAPIKey  string `toml:"xc_api_key"`
 }
 
 // TelegramConfig is the [telegram] section.
