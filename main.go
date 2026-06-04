@@ -11,278 +11,147 @@ import (
 
 const version = "0.2.1"
 
-func printHelp() {
-	fmt.Printf(`cairn - A command-line tool to post content to Telegram channels
-Version: %s
-
-Usage:
-  cairn [flags]
-
-Flags:
-  -h, --help          Show this help message
-  -c, --config PATH   Path to config file (default: ~/.cairn.toml)
-  -p, --post TEXT     Content to post (can include tags with #)
-  -f, --file PATH     Read content from a file
-  -P, --photo PATH   Path to photo file(s) to post (comma or space-separated, caption from -p or -f)
-  -m, --morning       Get Fitbit sleep data and post to Telegram channel
-  -W, --writer PATH   Read setting from file, send to OpenAI or OpenRouter (streaming), get generated content
-  -o, --output PATH   Write generated content to file (use with -W)
-  -d, --dict WORD     Look up word meaning (Free Dictionary API)
-  -F, --places-file PATH  Geocode places from file, one per line ([google] api_key); use - for stdin
-  -T, --travel        With -F: optimize visit order (great-circle km); first line = start
-      --travel-open   With -T: mode 2 — end at last stop; do not return to the first place (default: mode 1, round trip)
-  -B, --bird-download NAME  Download a bird species (Chinese/English/scientific name)
-  -L, --bird-list           List downloaded bird species
-  -A, --bird-play NAME      Play audio recordings for a downloaded bird species
-  -Q, --bird-quiz            Start bird sound quiz (default 4 choices), e.g. cairn -Q 3
-      --bird-audio-dir DIR  Audio storage directory (default ~/.cairn_bird_audio/)
-  -u, --update ID           Update message/caption by ID (-p/-f), or replace photo (-P with one file)
-
-Examples:
-  cairn -p "Hello world #tag1 #tag2"
-  cairn -f message.txt
-  cairn -P image.jpg -p "Photo caption #tag1"
-  cairn -P image1.jpg,image2.jpg -p "Multiple photos"
-  cairn -P image1.jpg image2.jpg -p "Multiple photos"
-  cairn --photo image.jpg -f caption.txt
-  cairn -c ~/.custom_cairn.toml -p "Custom config"
-  cairn --morning
-  cairn -W prompt.txt
-  cairn -W prompt.txt -o result.txt
-  cairn -d hello
-  cairn --dict word
-  cairn -F places.txt
-  cairn -F places.txt -T
-  cairn -F places.txt -T --travel-open
-  cairn --places-file places.txt --travel
-  cairn -u 123 -p "Corrected message"
-  cairn -u 456 -p "New caption"           # update photo caption
-  cairn -u 456 -P new.jpg -p "New caption" # replace photo and caption
-  cairn -B "仓鸮"
-  cairn --bird-download "Barn Owl"
-  cairn --bird-download "Tyto alba"
-  cairn -L
-  cairn -A "仓鸮"
-  cairn --bird-play "Barn Owl"
-  cairn -Q
-  cairn -Q 3
-`, version)
+func fatal(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, "Error: "+format+"\n", args...)
+	os.Exit(1)
 }
 
 func main() {
-	configPath := pflag.StringP("config", "c", "~/.cairn.toml", "Path to config file")
-	postContent := pflag.StringP("post", "p", "", "Content to post")
-	filePath := pflag.StringP("file", "f", "", "Read content from a file")
-	photoPathStr := pflag.StringP("photo", "P", "", "Path to photo file(s) to post (comma-separated)")
-	morning := pflag.BoolP("morning", "m", false, "Get Fitbit sleep data and post to Telegram channel")
-	dumpSleep := pflag.String("dump-sleep", "", "With -m: dump raw Fitbit sleep JSON to PATH and exit (do not post)")
-	writerPath := pflag.StringP("writer", "W", "", "Read setting from file, send to OpenRouter (streaming), get generated content")
-	outputPath := pflag.StringP("output", "o", "", "Write generated content to file (use with -W)")
-	dictWord := pflag.StringP("dict", "d", "", "Look up word meaning")
-	placesFile := pflag.StringP("places-file", "F", "", "Read place names to geocode, one per line (- for stdin)")
-	travel := pflag.BoolP("travel", "T", false, "With -F: optimize route (great-circle); first line is start; add --travel-open for no return")
-	travelOpen := pflag.Bool("travel-open", false, "With -T: open path — do not return to first place")
-	updateMsgID := pflag.StringP("update", "u", "", "Message ID to update (use with -p or -f for new content)")
-	birdDownload := pflag.StringP("bird-download", "B", "", "Download bird data by name (Chinese/English/scientific)")
-	birdList := pflag.BoolP("bird-list", "L", false, "List downloaded bird species")
-	birdPlay := pflag.StringP("bird-play", "A", "", "Play audio recordings for a downloaded bird")
-	birdQuiz := pflag.BoolP("bird-quiz", "Q", false, "Start a bird sound quiz (default 4 choices)")
-	birdAudioDir := pflag.String("bird-audio-dir", "", "Directory to store bird audio files (default ~/.cairn_bird_audio/)")
-	help := pflag.BoolP("help", "h", false, "Show help message")
+	cfgPath := "~/.cairn.toml"
 
-	pflag.Parse()
-
-	if *help {
-		printHelp()
-		os.Exit(0)
+	if len(os.Args) >= 2 && os.Args[1] == "-h" || len(os.Args) >= 2 && os.Args[1] == "--help" {
+		printHelp("")
+		return
 	}
 
-	cfgPath := *configPath
+	i := 1
+	for i < len(os.Args) {
+		if os.Args[i] == "-c" || os.Args[i] == "--config" {
+			if i+1 < len(os.Args) {
+				cfgPath = os.Args[i+1]
+				os.Args = append(os.Args[:i], os.Args[i+2:]...)
+				continue
+			}
+		}
+		i++
+	}
+
 	config, err := loadConfig(cfgPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal("%v", err)
 	}
 
-	if *morning {
-		if *dumpSleep != "" {
-			if err := DumpSleepJSON(config, *dumpSleep); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-			return
-		}
-		if err := requireTelegram(config); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		var additionalText string
-		content, file := *postContent, *filePath
-		if file != "" {
-			additionalText, err = readFileContent(file)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-		} else if content != "" {
-			additionalText = content
-		}
-		if err := Morning(config, additionalText); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		return
+	if len(os.Args) < 2 {
+		printHelp("")
+		fatal("no command specified")
 	}
 
-	if *writerPath != "" {
-		if err := Writer(config, *writerPath, *outputPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
+	cmd := os.Args[1]
+	os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
 
-	if pflag.Lookup("dict").Changed {
-		word := *dictWord
-		if word == "" && pflag.NArg() > 0 {
-			word = pflag.Arg(0)
+	switch cmd {
+	case "help":
+		sub := ""
+		if len(os.Args) > 1 {
+			sub = os.Args[1]
 		}
-		if word == "" {
-			fmt.Fprintln(os.Stderr, "Error: -d/--dict requires a word (e.g. cairn -d hello)")
-			os.Exit(1)
+		printHelp(sub)
+	case "post":
+		if len(os.Args) < 2 {
+			printHelp("post")
+			fatal("post requires a subcommand: send or edit")
 		}
-		if err := Dict(word); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+		sub := os.Args[1]
+		os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
+		switch sub {
+		case "send":
+			cmdPostSend(config)
+		case "edit":
+			cmdPostEdit(config)
+		default:
+			printHelp("post")
+			fatal("unknown post subcommand: %s", sub)
 		}
-		return
+	case "write":
+		cmdWrite(config)
+	case "dict":
+		cmdDict()
+	case "geo":
+		if len(os.Args) < 2 {
+			printHelp("geo")
+			fatal("geo requires a subcommand: list or route")
+		}
+		sub := os.Args[1]
+		os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
+		switch sub {
+		case "list":
+			cmdGeoList(config)
+		case "route":
+			cmdGeoRoute(config)
+		default:
+			printHelp("geo")
+			fatal("unknown geo subcommand: %s", sub)
+		}
+	case "bird":
+		if len(os.Args) < 2 {
+			printHelp("bird")
+			fatal("bird requires a subcommand: download, list, play, or quiz")
+		}
+		sub := os.Args[1]
+		os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
+		switch sub {
+		case "download":
+			cmdBirdDownload(config)
+		case "list":
+			cmdBirdList()
+		case "play":
+			cmdBirdPlay()
+		case "quiz":
+			cmdBirdQuiz()
+		default:
+			printHelp("bird")
+			fatal("unknown bird subcommand: %s", sub)
+		}
+	case "fitbit":
+		if len(os.Args) < 2 {
+			printHelp("fitbit")
+			fatal("fitbit requires a subcommand: morning or dump")
+		}
+		sub := os.Args[1]
+		os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
+		switch sub {
+		case "morning":
+			cmdFitbitMorning(config)
+		case "dump":
+			cmdFitbitDump(config)
+		default:
+			printHelp("fitbit")
+			fatal("unknown fitbit subcommand: %s", sub)
+		}
+	default:
+		printHelp("")
+		fatal("unknown command: %s", cmd)
 	}
+}
 
-	if pflag.Lookup("bird-download").Changed || pflag.Lookup("bird-list").Changed || pflag.Lookup("bird-quiz").Changed || pflag.Lookup("bird-play").Changed {
-		audioDir := *birdAudioDir
-		if err := handleBirdCommand(*birdDownload, *birdList, *birdPlay, *birdQuiz, audioDir, config.Ebird.XCAPIKey); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
+// ----- post -----
 
-	if *travel && *placesFile == "" {
-		fmt.Fprintln(os.Stderr, "Error: -T/--travel requires -F/--places-file")
-		os.Exit(1)
-	}
-	if *travelOpen && !*travel {
-		fmt.Fprintln(os.Stderr, "Error: --travel-open requires -T/--travel")
-		os.Exit(1)
-	}
+func cmdPostSend(config *Config) {
+	fs := pflag.NewFlagSet("post send", pflag.ExitOnError)
+	content := fs.StringP("post", "p", "", "Content to post")
+	file := fs.StringP("file", "f", "", "Read content from a file")
+	photoStr := fs.StringP("photo", "P", "", "Comma-separated photo paths")
+	fs.Parse(os.Args)
 
-	if *placesFile != "" {
-		places, err := readPlacesFromFile(*placesFile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		if len(places) == 0 {
-			fmt.Fprintln(os.Stderr, "Error: no place names in file (use one non-comment line per place; # starts a comment)")
-			os.Exit(1)
-		}
-		if *travel {
-			if err := TravelPlacesRoute(config, places, !*travelOpen); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-		} else {
-			if err := GeocodePlaces(config, places); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-		}
-		return
-	}
-
-	if *updateMsgID != "" {
-		if err := requireTelegram(config); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		msgID, err := strconv.ParseInt(*updateMsgID, 10, 64)
-		if err != nil || msgID <= 0 {
-			fmt.Fprintln(os.Stderr, "Error: -u/--update requires a positive integer message ID")
-			os.Exit(1)
-		}
-		var updatePhotos []string
-		if *photoPathStr != "" {
-			for _, p := range strings.Split(*photoPathStr, ",") {
-				p = strings.TrimSpace(p)
-				if p != "" {
-					updatePhotos = append(updatePhotos, p)
-				}
-			}
-			for _, p := range pflag.Args() {
-				p = strings.TrimSpace(p)
-				if p != "" {
-					updatePhotos = append(updatePhotos, p)
-				}
-			}
-		}
-		content, file := *postContent, *filePath
-		if len(updatePhotos) == 1 {
-			var newCaption string
-			if file != "" {
-				newCaption, err = readFileContent(file)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					os.Exit(1)
-				}
-			} else {
-				newCaption = content
-			}
-			if err := editMessageMediaTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, msgID, updatePhotos[0], newCaption); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-			return
-		}
-		if content == "" && file == "" {
-			fmt.Fprintln(os.Stderr, "Error: -u/--update requires -p or -f for the new content (or -P with one photo to replace the image)")
-			os.Exit(1)
-		}
-		if content != "" && file != "" {
-			fmt.Fprintln(os.Stderr, "Error: Cannot use both --post and --file with -u")
-			os.Exit(1)
-		}
-		var newContent string
-		if file != "" {
-			newContent, err = readFileContent(file)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-		} else {
-			newContent = content
-		}
-		err = editMessageTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, msgID, newContent)
-		if err != nil && (strings.Contains(err.Error(), "message has no text") || strings.Contains(err.Error(), "no text in the message to edit")) {
-			err = editMessageCaptionTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, msgID, newContent)
-		}
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	content := *postContent
-	file := *filePath
 	var photos []string
-	if *photoPathStr != "" {
-		for _, p := range strings.Split(*photoPathStr, ",") {
+	if *photoStr != "" {
+		for _, p := range strings.Split(*photoStr, ",") {
 			p = strings.TrimSpace(p)
 			if p != "" {
 				photos = append(photos, p)
 			}
 		}
-		for _, p := range pflag.Args() {
+		for _, p := range fs.Args() {
 			p = strings.TrimSpace(p)
 			if p != "" {
 				photos = append(photos, p)
@@ -290,50 +159,340 @@ func main() {
 		}
 	}
 
-	if len(photos) == 0 {
-		if content == "" && file == "" {
-			fmt.Fprintln(os.Stderr, "Error: Either --post or --file must be provided (or use -P/--photo to post a photo, -m/--morning for sleep data, -W/--writer for OpenRouter, -F/--places-file to geocode or -T with -F for a round trip, -d/--dict for dictionary lookup, or -B/-L/-A/-Q for bird quiz)")
-			printHelp()
-			os.Exit(1)
-		}
-		if content != "" && file != "" {
-			fmt.Fprintln(os.Stderr, "Error: Cannot use both --post and --file at the same time")
-			os.Exit(1)
-		}
+	if len(photos) == 0 && *content == "" && *file == "" {
+		printHelp("post send")
+		fatal("requires -p, -f, or -P")
 	}
 
-	var finalContent string
-	if file != "" {
-		finalContent, err = readFileContent(file)
+	var text string
+	var err error
+	if *file != "" {
+		text, err = readFileContent(*file)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			fatal("%v", err)
 		}
 	} else {
-		finalContent = content
+		text = *content
 	}
 
 	if err := requireTelegram(config); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal("%v", err)
 	}
 
-	if len(photos) > 0 {
-		if len(photos) == 1 {
-			if _, err := postPhotoToTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, photos[0], finalContent); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-		} else {
-			if _, err := postMultiplePhotosToTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, photos, finalContent); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
+	if len(photos) == 1 {
+		if _, err := postPhotoToTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, photos[0], text); err != nil {
+			fatal("%v", err)
+		}
+	} else if len(photos) > 1 {
+		if _, err := postMultiplePhotosToTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, photos, text); err != nil {
+			fatal("%v", err)
 		}
 	} else {
-		if _, err := postToTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, finalContent); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+		if _, err := postToTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, text); err != nil {
+			fatal("%v", err)
 		}
+	}
+	fmt.Fprintln(os.Stderr, "Posted.")
+}
+
+func cmdPostEdit(config *Config) {
+	if err := requireTelegram(config); err != nil {
+		fatal("%v", err)
+	}
+
+	fs := pflag.NewFlagSet("post edit", pflag.ExitOnError)
+	content := fs.StringP("post", "p", "", "New content")
+	file := fs.StringP("file", "f", "", "Read new content from a file")
+	photoStr := fs.StringP("photo", "P", "", "New photo path (single file)")
+	fs.Parse(os.Args)
+
+	if fs.NArg() < 1 {
+		printHelp("post edit")
+		fatal("requires message ID as argument")
+	}
+	msgID, err := strconv.ParseInt(fs.Arg(0), 10, 64)
+	if err != nil || msgID <= 0 {
+		fatal("message ID must be a positive integer")
+	}
+
+	if *photoStr != "" {
+		caption := *content
+		if *file != "" {
+			caption, err = readFileContent(*file)
+			if err != nil {
+				fatal("%v", err)
+			}
+		}
+		if err := editMessageMediaTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, msgID, *photoStr, caption); err != nil {
+			fatal("%v", err)
+		}
+		return
+	}
+
+	if *content == "" && *file == "" {
+		fatal("requires -p or -f for new content (or -P to replace image)")
+	}
+	if *content != "" && *file != "" {
+		fatal("cannot use both -p and -f")
+	}
+
+	var newContent string
+	if *file != "" {
+		newContent, err = readFileContent(*file)
+		if err != nil {
+			fatal("%v", err)
+		}
+	} else {
+		newContent = *content
+	}
+
+	err = editMessageTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, msgID, newContent)
+	if err != nil && (strings.Contains(err.Error(), "message has no text") || strings.Contains(err.Error(), "no text in the message to edit")) {
+		err = editMessageCaptionTelegram(config.Telegram.BotToken, config.Telegram.ChannelID, msgID, newContent)
+	}
+	if err != nil {
+		fatal("%v", err)
+	}
+	fmt.Fprintln(os.Stderr, "Edited.")
+}
+
+// ----- write -----
+
+func cmdWrite(config *Config) {
+	fs := pflag.NewFlagSet("write", pflag.ExitOnError)
+	promptFile := fs.StringP("file", "f", "", "Prompt file path")
+	outputFile := fs.StringP("output", "o", "", "Output file path")
+	fs.Parse(os.Args)
+
+	if *promptFile == "" {
+		printHelp("write")
+		fatal("requires -f/--file")
+	}
+	if err := Writer(config, *promptFile, *outputFile); err != nil {
+		fatal("%v", err)
+	}
+}
+
+// ----- dict -----
+
+func cmdDict() {
+	if len(os.Args) < 2 {
+		printHelp("dict")
+		fatal("requires a word (e.g. cairn dict hello)")
+	}
+	if err := Dict(strings.Join(os.Args[1:], " ")); err != nil {
+		fatal("%v", err)
+	}
+}
+
+// ----- geo -----
+
+func cmdGeoList(config *Config) {
+	fs := pflag.NewFlagSet("geo list", pflag.ExitOnError)
+	placesFile := fs.StringP("file", "f", "", "Places file (one per line, - for stdin)")
+	fs.Parse(os.Args)
+
+	if *placesFile == "" {
+		printHelp("geo list")
+		fatal("requires -f/--file")
+	}
+	places, err := readPlacesFromFile(*placesFile)
+	if err != nil {
+		fatal("%v", err)
+	}
+	if len(places) == 0 {
+		fatal("no place names in file")
+	}
+	if err := GeocodePlaces(config, places); err != nil {
+		fatal("%v", err)
+	}
+}
+
+func cmdGeoRoute(config *Config) {
+	fs := pflag.NewFlagSet("geo route", pflag.ExitOnError)
+	placesFile := fs.StringP("file", "f", "", "Places file (one per line, first = start)")
+	open := fs.Bool("open", false, "Open path (don't return to start)")
+	fs.Parse(os.Args)
+
+	if *placesFile == "" {
+		printHelp("geo route")
+		fatal("requires -f/--file")
+	}
+	places, err := readPlacesFromFile(*placesFile)
+	if err != nil {
+		fatal("%v", err)
+	}
+	if len(places) == 0 {
+		fatal("no place names in file")
+	}
+	if err := TravelPlacesRoute(config, places, !*open); err != nil {
+		fatal("%v", err)
+	}
+}
+
+// ----- bird -----
+
+func cmdBirdDownload(config *Config) {
+	fs := pflag.NewFlagSet("bird download", pflag.ExitOnError)
+	audioDir := fs.String("audio-dir", "", "Audio storage directory (default ~/.cairn_bird_audio/)")
+	fs.Parse(os.Args)
+
+	name := strings.Join(fs.Args()[1:], " ")
+	if name == "" {
+		printHelp("bird download")
+		fatal("requires a bird name")
+	}
+	if err := BirdDownload(name, *audioDir, config.Ebird.XCAPIKey); err != nil {
+		fatal("%v", err)
+	}
+}
+
+func cmdBirdList() {
+	if err := BirdList(); err != nil {
+		fatal("%v", err)
+	}
+}
+
+func cmdBirdPlay() {
+	if len(os.Args) < 2 {
+		printHelp("bird play")
+		fatal("requires a bird name")
+	}
+	name := strings.Join(os.Args[1:], " ")
+	if err := BirdPlay(name); err != nil {
+		fatal("%v", err)
+	}
+}
+
+func cmdBirdQuiz() {
+	fs := pflag.NewFlagSet("bird quiz", pflag.ExitOnError)
+	audioDir := fs.String("audio-dir", "", "Audio storage directory (default ~/.cairn_bird_audio/)")
+	fs.Parse(os.Args)
+
+	n := 4
+	args := fs.Args()[1:]
+	if len(args) > 0 {
+		if v, err := strconv.Atoi(args[0]); err == nil && v >= 2 {
+			n = v
+		}
+	}
+	if err := BirdQuiz(n, *audioDir); err != nil {
+		fatal("%v", err)
+	}
+}
+
+// ----- fitbit -----
+
+func cmdFitbitMorning(config *Config) {
+	if err := requireTelegram(config); err != nil {
+		fatal("%v", err)
+	}
+	fs := pflag.NewFlagSet("fitbit morning", pflag.ExitOnError)
+	text := fs.StringP("post", "p", "", "Additional text")
+	file := fs.StringP("file", "f", "", "Additional text from file")
+	fs.Parse(os.Args)
+
+	var additional string
+	var err error
+	if *file != "" {
+		additional, err = readFileContent(*file)
+		if err != nil {
+			fatal("%v", err)
+		}
+	} else {
+		additional = *text
+	}
+	if err := Morning(config, additional); err != nil {
+		fatal("%v", err)
+	}
+}
+
+func cmdFitbitDump(config *Config) {
+	if len(os.Args) < 2 {
+		printHelp("fitbit dump")
+		fatal("requires output file path")
+	}
+	if err := DumpSleepJSON(config, os.Args[1]); err != nil {
+		fatal("%v", err)
+	}
+}
+
+// ----- help -----
+
+func printHelp(command string) {
+	if cmd, _, ok := strings.Cut(command, " "); ok {
+		command = cmd
+	}
+	switch command {
+	case "post":
+		fmt.Printf(`cairn post — Send messages to Telegram
+
+Usage:
+  cairn post send  -p <text>                 Post text
+  cairn post send  -f <file>                 Post file content
+  cairn post send  -P <img> -p <caption>     Post photo with caption
+  cairn post send  -P a.jpg,b.jpg -p <text>  Post multiple photos
+  cairn post edit  <id> -p <text>            Edit message text
+  cairn post edit  <id> -P <img> -p <cap>    Replace photo + caption
+`)
+	case "write":
+		fmt.Printf(`cairn write — Generate text with LLM (OpenAI / OpenRouter)
+
+Usage:
+  cairn write -f <prompt_file>               Stream output
+  cairn write -f <prompt_file> -o <out>      Save to file
+`)
+	case "dict":
+		fmt.Printf(`cairn dict — Look up word in dictionary
+
+Usage:
+  cairn dict <word>
+`)
+	case "geo":
+		fmt.Printf(`cairn geo — Geocode places and optimize routes
+
+Usage:
+  cairn geo list  -f <file>                 Geocode places (one per line)
+  cairn geo route -f <file>                 Round-trip optimization
+  cairn geo route -f <file> --open          One-way optimization
+`)
+	case "bird":
+		fmt.Printf(`cairn bird — Bird sound identification
+
+Usage:
+  cairn bird download <name>                 Download bird (CN/EN/sci name)
+  cairn bird list                            List downloaded birds
+  cairn bird play <name>                     Play recordings
+  cairn bird quiz [N]                        Start quiz (default 4 choices)
+        --audio-dir DIR                     Audio storage (default ~/.cairn_bird_audio/)
+`)
+	case "fitbit":
+		fmt.Printf(`cairn fitbit — Fitbit sleep data
+
+Usage:
+  cairn fitbit morning [text]                Post sleep report + optional text
+  cairn fitbit morning -f <file>             Post sleep report + file content
+  cairn fitbit dump <path>                   Export raw sleep JSON
+`)
+	default:
+		fmt.Printf(`cairn — CLI toolkit
+Version: %s
+
+Usage:
+  cairn [-c <config>] <command> [args...]
+
+Commands:
+  post        Telegram messaging
+  write       LLM writing (OpenAI / OpenRouter)
+  dict        Dictionary lookup
+  geo         Geocoding and route optimization
+  bird        Bird sound quiz (eBird + Xeno-Canto)
+  fitbit      Fitbit sleep data
+
+Global:
+  -c, --config PATH   Config file (default: ~/.cairn.toml)
+
+Run 'cairn help <command>' for details.
+`, version)
 	}
 }
