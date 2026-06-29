@@ -1,5 +1,6 @@
 # cairn Makefile
 
+SHELL := /bin/bash
 BINARY := cairn
 VERSION := $(shell grep 'const version' main.go | sed 's/.*"\(.*\)".*/\1/')
 REQUIRED_GO := 1.23
